@@ -10,8 +10,6 @@ Original file is located at
 # app.py
 # streamlit run app.py
 
-import io
-import json
 import pandas as pd
 import streamlit as st
 import string
@@ -19,76 +17,67 @@ import string
 
 # あなたのエンジンをimport（ファイル名に合わせて変更）
 import spofes_engine as eng
-GRADE_OPTIONS = [1, 2, 3]
-COLOR_OPTIONS = ["", "赤", "青", "黄"]
 
-def make_default_class_df(default_color=""):
+def make_default_class_df():
     rows = []
     for letter in list(string.ascii_uppercase[:10]):  # 1年 A-J
-        rows.append({"学年": 1, "クラス": letter, "色": default_color})
+        rows.append({"学年": 1, "クラス": letter, "赤": False, "青": False, "黄": False})
     for letter in list(string.ascii_uppercase[:9]):   # 2年 A-I
-        rows.append({"学年": 2, "クラス": letter, "色": default_color})
+        rows.append({"学年": 2, "クラス": letter, "赤": False, "青": False, "黄": False})
     for letter in list(string.ascii_uppercase[:9]):   # 3年 A-I
-        rows.append({"学年": 3, "クラス": letter, "色": default_color})
+        rows.append({"学年": 3, "クラス": letter, "赤": False, "青": False, "黄": False})
     return pd.DataFrame(rows)
+
 
 def build_classes_from_df(df):
     classes = []
     for _, r in df.iterrows():
         g = str(r["学年"]).strip()
         c = str(r["クラス"]).strip().upper()
-        color = str(r["色"]).strip()
-        if not g or not c or not color:
+
+        colors = [col for col in ["赤", "青", "黄"] if bool(r[col])]
+
+        # 色はちょうど1つ必要
+        if len(colors) != 1:
             continue
+
+        color = colors[0]
         classes.append([f"{g}{c}", int(g), color])
+
     return classes
 
-def validate_colors(df: pd.DataFrame):
-    """
-    色が未入力のクラスがあればエラーにする
-    """
-    missing = df[df["色"].astype(str).str.strip() == ""]
 
-    if not missing.empty:
-        names = [
-            f'{int(r["学年"])}{r["クラス"]}'
-            for _, r in missing.iterrows()
-        ]
+def validate_colors(df: pd.DataFrame):
+    bad = []
+    for _, r in df.iterrows():
+        count = sum(bool(r[col]) for col in ["赤", "青", "黄"])
+        if count != 1:
+            bad.append(f'{int(r["学年"])}{r["クラス"]}')
+
+    if bad:
         st.error(
-            "❌ 色が未入力のクラスがあります。\n\n"
-            + "・" + "\n・".join(names)
+            "❌ 色は「赤・青・黄」のうち1つだけ選んでください。\n\n"
+            + "・" + "\n・".join(bad)
         )
         st.stop()
 
+def enforce_single_color(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for i, r in df.iterrows():
+        flags = {c: bool(r[c]) for c in ["赤", "青", "黄"]}
+        on = [c for c, v in flags.items() if v]
 
-st.set_page_config(page_title="スポフェス自動編成", layout="wide")
+        if len(on) <= 1:
+            continue
 
-st.title("スポフェス自動編成（リーグ分け＋時程表＋CSV出力）")
+        # 複数ONなら「最後にONになったっぽいもの」を推測できないので
+        # ここでは安全に「赤だけ残す」など固定にするのも手。
+        # ただ、ユーザーが意図した色を尊重したいなら、ここはルールを決めよう。
+        keep = on[-1]  # とりあえず最後のTrueを残す（順序は赤→青→黄）
+        for c in ["赤", "青", "黄"]:
+            df.at[i, c] = (c == keep)
 
-# ----------------------------
-# 入力：JSONアップロード or テンプレ
-# ----------------------------
-st.header("① クラス設定")
-
-if "class_df" not in st.session_state:
-    st.session_state.class_df = make_default_class_df()
-
-if st.button("デフォルトに戻す"):
-    st.session_state.class_df = make_default_class_df()
-
-edited = st.data_editor(
-    st.session_state.class_df,
-    num_rows="dynamic",
-    use_container_width=True,
-    column_config={
-        "学年": st.column_config.SelectboxColumn("学年", options=GRADE_OPTIONS, required=True),
-        "クラス": st.column_config.TextColumn("クラス", help="A, B, C ...", required=True),
-        "色": st.column_config.SelectboxColumn("色", options=COLOR_OPTIONS, required=True),
-    },
-)
-
-st.session_state.class_df = edited
-classes_ui = build_classes_from_df(st.session_state.class_df)
+    return df
 
 
 DEFAULT_CONFIG = {
@@ -118,49 +107,42 @@ DEFAULT_CONFIG = {
     }
 }
 
-uploaded = st.sidebar.file_uploader("設定JSONをアップロード", type=["json"])
+st.set_page_config(page_title="スポフェス自動編成", layout="wide")
 
-if "config" not in st.session_state:
-    st.session_state.config = DEFAULT_CONFIG
 
-if uploaded is not None:
-    try:
-        st.session_state.config = json.load(uploaded)
-        st.sidebar.success("JSONを読み込みました")
-    except Exception as e:
-        st.sidebar.error(f"JSONの読み込みに失敗: {e}")
+st.title("スポフェス自動編成（リーグ分け＋時程表＋CSV出力）")
 
-st.sidebar.subheader("設定JSON（編集可）")
-config_text = st.sidebar.text_area(
-    "config",
-    value=json.dumps(st.session_state.config, ensure_ascii=False, indent=2),
-    height=380
+# ----------------------------
+# 入力：JSONアップロード or テンプレ
+# ----------------------------
+st.header("① クラス設定")
+
+if "class_df" not in st.session_state:
+    st.session_state.class_df = make_default_class_df()
+
+if st.button("デフォルトに戻す"):
+    st.session_state.class_df = make_default_class_df()
+
+edited = st.data_editor(
+    st.session_state.class_df,
+    num_rows="dynamic",
+    use_container_width=True,
+    column_config={
+        "学年": st.column_config.SelectboxColumn("学年", options=[1, 2, 3], required=True),
+        "クラス": st.column_config.TextColumn("クラス", required=True),
+        "赤": st.column_config.CheckboxColumn("赤"),
+        "青": st.column_config.CheckboxColumn("青"),
+        "黄": st.column_config.CheckboxColumn("黄"),
+    },
+    key="class_editor",
 )
 
-colA, colB = st.sidebar.columns(2)
-with colA:
-    if st.button("このJSONを反映"):
-        try:
-            st.session_state.config = json.loads(config_text)
-            st.success("反映しました")
-        except Exception as e:
-            st.error(f"JSONが不正です: {e}")
+st.session_state.class_df = enforce_single_color(edited)
 
-with colB:
-    st.download_button(
-        "テンプレJSONを保存",
-        data=json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2).encode("utf-8"),
-        file_name="config_template.json",
-        mime="application/json"
-    )
 
-cfg = st.session_state.config
-# UIで作ったクラスを config に上書き
-cfg["classes"] = classes_ui
-st.session_state.config = cfg
 
-# JSONが無いときの保険（前にうまくいった設定）
-cfg.setdefault("per_event_parallel", 1)
+st.session_state.class_df = enforce_single_color(edited)
+
 
 # ----------------------------
 # 入力チェック（軽め）
@@ -189,13 +171,6 @@ def normalize_config(cfg: dict):
 
     return classes_t, events_n, params
 
-
-try:
-    classes, events, params = normalize_config(cfg)
-except Exception as e:
-    st.error(f"設定の整形に失敗しました: {e}")
-    st.stop()
-
 # ----------------------------
 # 実行ボタン
 # ----------------------------
@@ -206,6 +181,18 @@ run = st.button("スケジュール生成", type="primary")
 if run:
     # 🔴 色未入力チェック
     validate_colors(st.session_state.class_df)
+
+    # UIから classes を確定
+    classes = build_classes_from_df(st.session_state.class_df)
+
+    # 内部 config をここで組み立て
+    cfg = {
+        **DEFAULT_CONFIG,          # events / params は既定値
+        "classes": classes,
+        "per_event_parallel": 1,
+    }
+
+    classes, events, params = normalize_config(cfg)
 
     with st.spinner("生成中..."):
         try:
@@ -228,10 +215,15 @@ if run:
             st.success("生成成功！")
             st.session_state.final_timetable = final_timetable
             st.session_state.info = info
+            st.session_state.classes = classes
+            st.session_state.events = events
+            st.session_state.params = params
+
 
         except Exception as e:
             st.error(f"例外で停止しました: {e}")
             st.stop()
+
 
 # ----------------------------
 # 結果表示
@@ -239,6 +231,9 @@ if run:
 if "final_timetable" in st.session_state and "info" in st.session_state:
     final_timetable = st.session_state.final_timetable
     info = st.session_state.info
+    classes = st.session_state.classes
+    events  = st.session_state.events
+    params  = st.session_state.params
 
     # リーグ分けを復元
     league_seed = info.get("league_seed", params.get("seed", 42))
