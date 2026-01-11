@@ -8,8 +8,8 @@ st.set_page_config(page_title="スポフェス 時程表", layout="wide")
 # =========================
 # 設定：GASのURLを入れる
 # =========================
-GAS_URL = st.secrets.get("GAS_URL", "")  # secretsが無いなら下で直書きでもOK
-# GAS_URL = "https://script.google.com/macros/s/XXXX/exec"
+
+GAS_URL = st.secrets.get("GAS_WEBAPP_URL", "")
 
 
 # =========================
