@@ -1,169 +1,143 @@
-# app.py
-import os
+import json
 import requests
 import pandas as pd
 import streamlit as st
 
-AUTO_REFRESH_SECONDS = 15
+st.set_page_config(page_title="スポフェス 時程表", layout="wide")
 
-try:
-    from streamlit_autorefresh import st_autorefresh  # type: ignore
-    _HAS_AUTOREFRESH = True
-except Exception:
-    _HAS_AUTOREFRESH = False
-
-
-def get_gas_url() -> str:
-    if "GAS_WEBAPP_URL" in st.secrets:
-        return str(st.secrets["GAS_WEBAPP_URL"])
-    env = os.environ.get("GAS_WEBAPP_URL", "").strip()
-    if env:
-        return env
-    raise RuntimeError("GAS_WEBAPP_URL が未設定です（secrets か環境変数に設定してください）")
+# =========================
+# 設定：GASのURLを入れる
+# =========================
+GAS_URL = st.secrets.get("GAS_URL", "")  # secretsが無いなら下で直書きでもOK
+# GAS_URL = "https://script.google.com/macros/s/XXXX/exec"
 
 
-@st.cache_data(ttl=AUTO_REFRESH_SECONDS)
-def fetch_year_list(gas_url: str) -> list:
-    """
-    GASに ?mode=years を投げて、年度一覧を取る想定。
-    戻り値例: {"ok": true, "years": [2024, 2025, 2026]}
-    """
-    r = requests.get(gas_url, params={"mode": "years"}, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    if not data.get("ok", False):
-        raise RuntimeError(data.get("error", "ok=false"))
-    years = data.get("years", [])
-    # 文字列でも数値でもOKに
-    years = [str(y) for y in years]
-    if not years:
-        raise RuntimeError("years が空です（GAS側で years を返してください）")
-    return years
-
-
-@st.cache_data(ttl=AUTO_REFRESH_SECONDS)
+# =========================
+# データ取得（キャッシュはONだが ttl無し＝勝手に再取得しない）
+# =========================
+@st.cache_data
 def fetch_payload(gas_url: str, year: str) -> dict:
-    """
-    GASに ?year=YYYY を投げて、その年度の payload を取る想定。
-    戻り値例:
-    {
-      "ok": true,
-      "payload": {"leagues":[...], "timetable":[...]},
-      "updated_at": "..."
-    }
-    """
+    if not gas_url:
+        raise RuntimeError("GAS_URL が未設定です（st.secrets または直書きで設定してね）")
+
+    # 例: .../exec?year=2026
     r = requests.get(gas_url, params={"year": year}, timeout=30)
     r.raise_for_status()
+
     data = r.json()
-    if not data.get("ok", False):
-        raise RuntimeError(data.get("error", "ok=false"))
-    payload = data.get("payload")
-    if not isinstance(payload, dict):
-        raise RuntimeError("payload が dict ではありません")
-    return data
+    if not data.get("ok"):
+        raise RuntimeError(data.get("error", "GASから ok:false が返りました"))
+
+    return data["payload"]
 
 
-def to_df_safe(obj, columns=None) -> pd.DataFrame:
-    if obj is None:
-        return pd.DataFrame(columns=columns or [])
-    if isinstance(obj, list):
-        return pd.DataFrame(obj)
-    if isinstance(obj, dict):
+def build_schedule_locally(payload: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    payload = {classes, events, params, tournamentId} を受け取り、
+    あなたのスケジューラ関数で timetable/leagues を作る想定。
+
+    ここは「あなたの既存コード（scheduler.py相当）」をimportして呼び出す。
+    """
+    # --- ここを自分の関数に合わせてimport/呼び出ししてね ---
+    # from scheduler import try_build_parallel_timetable_with_retries_v2, export_leagues_and_timetable_dfs
+    # tt, info = try_build_parallel_timetable_with_retries_v2(payload["events"], payload["classes"], **payload["params"])
+    # leagues_df, timetable_df = export_leagues_and_timetable_dfs(payload["events"], payload["classes"], tt, info)
+    # return leagues_df, timetable_df
+
+    raise NotImplementedError(
+        "build_schedule_locally() の中を、あなたのスケジューラ呼び出しに置き換えてください。"
+    )
+
+
+# =========================
+# UI：年度選択 + 半自動更新
+# =========================
+st.title("スポフェス：リーグ分け & 時程表")
+
+year = st.text_input("年度（例: 2026 / DUMMY など）", value="DUMMY").strip()
+
+col1, col2 = st.columns([1, 3])
+with col1:
+    manual_refresh = st.button("🔄 最新データを取得（手動）", use_container_width=True)
+with col2:
+    st.caption("半自動モード：最初の1回だけ自動取得。以降はこのボタンを押した時だけ更新します。")
+
+# セッションに「このyearを読み込んだか」を覚えさせる
+key_loaded = f"loaded_{year}"
+
+# 初回だけ自動取得、ボタン押下時は強制再取得
+should_fetch = False
+if key_loaded not in st.session_state:
+    should_fetch = True
+elif manual_refresh:
+    should_fetch = True
+
+if should_fetch:
+    # 手動更新の時だけキャッシュをクリアして取り直す
+    if manual_refresh:
+        st.cache_data.clear()
+
+    with st.spinner("GASからデータ取得中..."):
         try:
-            return pd.DataFrame(obj)
-        except Exception:
-            return pd.DataFrame([obj])
-    return pd.DataFrame(columns=columns or [])
+            payload = fetch_payload(GAS_URL, year)
+            st.session_state[key_loaded] = True
+            st.session_state[f"payload_{year}"] = payload
+            st.success("取得しました")
+        except Exception as e:
+            st.error(f"データ取得に失敗: {e}")
+
+# payload が無ければ終了（ここで勝手に更新されない）
+payload = st.session_state.get(f"payload_{year}")
+if not payload:
+    st.info("まだデータがありません。上のボタンで取得してください。")
+    st.stop()
 
 
 # =========================
-# UI
+# 表示（ここでスケジュール生成）
 # =========================
-st.set_page_config(page_title="スポフェス 時程表", layout="wide")
-st.title("スポフェス：リーグ分け & 時程表（年度選択・自動更新）")
+st.subheader(f"取得した年度: {payload.get('tournamentId', year)}")
 
-if _HAS_AUTOREFRESH:
-    st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="autorefresh")
+with st.expander("payload（確認用）", expanded=False):
+    st.json(payload)
+
+st.divider()
+
+st.subheader("リーグ分け / 時程表の生成")
+run_build = st.button("📌 このデータで時程表を生成", type="primary")
+
+if run_build:
+    with st.spinner("時程表を生成中..."):
+        try:
+            leagues_df, timetable_df = build_schedule_locally(payload)
+
+            if timetable_df.empty:
+                st.error("時程表データが空です。入力データ（種目/参加クラス/同時進行数など）を確認してね。")
+                st.stop()
+
+            st.success("生成できました！")
+
+            st.subheader("リーグ分け")
+            st.dataframe(leagues_df, use_container_width=True)
+
+            st.subheader("時程表")
+            st.dataframe(timetable_df, use_container_width=True)
+
+            # ダウンロード
+            st.download_button(
+                "⬇ leagues.csv をダウンロード",
+                data=leagues_df.to_csv(index=False, encoding="utf-8-sig"),
+                file_name=f"leagues_{year}.csv",
+                mime="text/csv",
+            )
+            st.download_button(
+                "⬇ timetable.csv をダウンロード",
+                data=timetable_df.to_csv(index=False, encoding="utf-8-sig"),
+                file_name=f"timetable_{year}.csv",
+                mime="text/csv",
+            )
+
+        except Exception as e:
+            st.error(f"生成に失敗: {e}")
 else:
-    st.warning("自動更新を有効にするには `streamlit-autorefresh` を入れてください。")
-
-gas_url = get_gas_url()
-
-# 年度一覧を取得
-try:
-    years = fetch_year_list(gas_url)
-except Exception as e:
-    st.error(f"年度一覧の取得に失敗：{e}")
-    st.stop()
-
-# 年度選択（サイドバー）
-st.sidebar.header("表示設定")
-default_year = years[-1]  # 最新をデフォルト
-year = st.sidebar.selectbox("年度", options=years, index=years.index(default_year))
-
-# 年度ごとのデータ取得
-try:
-    data = fetch_payload(gas_url, year)
-except Exception as e:
-    st.error(f"データ取得に失敗（year={year}）：{e}")
-    st.stop()
-
-payload = data.get("payload", {})
-updated_at = data.get("updated_at", "")
-
-leagues_raw = payload.get("leagues") or payload.get("leagues_df") or []
-timetable_raw = payload.get("timetable") or payload.get("timetable_df") or []
-
-leagues_df = to_df_safe(leagues_raw, columns=["event", "league", "team"])
-timetable_df = to_df_safe(
-    timetable_raw,
-    columns=["slot_no", "start", "end", "event", "name", "team_a", "team_b", "referee", "phase", "gender"]
-)
-
-if "slot_no" in timetable_df.columns:
-    timetable_df["slot_no"] = pd.to_numeric(timetable_df["slot_no"], errors="coerce")
-    timetable_df = timetable_df.sort_values(["slot_no", "event", "name"], na_position="last")
-
-c1, c2, c3 = st.columns([2, 2, 3])
-with c1:
-    st.caption("選択年度")
-    st.write(year)
-with c2:
-    st.caption("最終更新（GAS側）")
-    st.write(updated_at if updated_at else "（未提供）")
-with c3:
-    st.caption("データ取得元")
-    st.code(gas_url, language="text")
-
-tabs = st.tabs(["時程表", "リーグ分け", "ダウンロード"])
-
-with tabs[0]:
-    st.subheader("時程表")
-    if timetable_df.empty:
-        st.info("時程表データが空です。")
-    else:
-        st.dataframe(timetable_df, use_container_width=True, hide_index=True)
-
-with tabs[1]:
-    st.subheader("リーグ分け")
-    if leagues_df.empty:
-        st.info("リーグ分けデータが空です。")
-    else:
-        st.dataframe(leagues_df.sort_values(["event", "league", "team"]), use_container_width=True, hide_index=True)
-
-with tabs[2]:
-    st.subheader("CSV ダウンロード")
-    if not leagues_df.empty:
-        st.download_button(
-            "leagues.csv をダウンロード",
-            data=leagues_df.to_csv(index=False, encoding="utf-8-sig"),
-            file_name=f"leagues_{year}.csv",
-            mime="text/csv",
-        )
-    if not timetable_df.empty:
-        st.download_button(
-            "timetable.csv をダウンロード",
-            data=timetable_df.to_csv(index=False, encoding="utf-8-sig"),
-            file_name=f"timetable_{year}.csv",
-            mime="text/csv",
-        )
+    st.info("上の「このデータで時程表を生成」を押すと生成します（半自動で勝手に再生成しません）。")
