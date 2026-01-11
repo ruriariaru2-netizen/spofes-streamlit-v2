@@ -8,22 +8,21 @@ import string
 
 import spofes_engine as eng
 
+# 先に1回だけ
+st.set_page_config(page_title="スポフェス自動編成", layout="wide")
+st.title("スポフェス自動編成（リーグ分け＋時程表＋CSV出力）")
 
 COLOR_OPTIONS = ["", "赤", "青", "黄"]  # 空欄=未選択
 
 def make_default_class_df():
     rows = []
-    # 1年 A-J
-    for letter in list(string.ascii_uppercase[:10]):
+    for letter in list(string.ascii_uppercase[:10]):  # 1年 A-J
         rows.append({"学年": 1, "クラス": letter, "色": ""})
-    # 2年 A-I
-    for letter in list(string.ascii_uppercase[:9]):
+    for letter in list(string.ascii_uppercase[:9]):   # 2年 A-I
         rows.append({"学年": 2, "クラス": letter, "色": ""})
-    # 3年 A-I
-    for letter in list(string.ascii_uppercase[:9]):
+    for letter in list(string.ascii_uppercase[:9]):   # 3年 A-I
         rows.append({"学年": 3, "クラス": letter, "色": ""})
     return pd.DataFrame(rows)
-
 
 def build_classes_from_df(df: pd.DataFrame):
     classes = []
@@ -38,7 +37,6 @@ def build_classes_from_df(df: pd.DataFrame):
         classes.append([f"{g}{c}", g, color])
     return classes
 
-
 def validate_colors(df: pd.DataFrame):
     bad = []
     for _, r in df.iterrows():
@@ -47,7 +45,6 @@ def validate_colors(df: pd.DataFrame):
         color = str(r["色"]).strip()
         if color not in ["赤", "青", "黄"]:
             bad.append(f"{g}{c}")
-
     if bad:
         st.error(
             "❌ 色が未選択のクラスがあります（赤・青・黄から1つ選んでください）\n\n"
@@ -55,11 +52,29 @@ def validate_colors(df: pd.DataFrame):
         )
         st.stop()
 
+def normalize_config(cfg: dict):
+    classes = cfg.get("classes", [])
+    events = cfg.get("events", {})
+    params = cfg.get("params", {})
+
+    classes_t = [tuple(x) for x in classes]
+
+    events_n = {}
+    all_class_ids = [c[0] for c in classes]
+    for name, info in events.items():
+        ii = dict(info)
+        parts = ii.get("participants", [])
+        if not parts:
+            parts = all_class_ids
+        ii["participants"] = set(parts)
+        events_n[name] = ii
+
+    return classes_t, events_n, params
 
 DEFAULT_CONFIG = {
     "events": {
         "リレー(男子)": {
-            "participants": [],  # 空なら「全クラス参加」にしたいなら、engine側に合わせる/normalizeで補完
+            "participants": [],
             "gender": "M",
             "min_teams": 3,
             "parallel": 2,
@@ -80,47 +95,31 @@ DEFAULT_CONFIG = {
     }
 }
 
+# ----- editorの安定同期 -----
+def _sync_editor_to_df():
+    st.session_state.class_df = st.session_state.class_editor_df
 
-def normalize_config(cfg: dict):
-    classes = cfg.get("classes", [])
-    events = cfg.get("events", {})
-    params = cfg.get("params", {})
+def _reset_df():
+    st.session_state.class_df = make_default_class_df()
+    st.session_state.class_editor_df = st.session_state.class_df.copy()
 
-    classes_t = [tuple(x) for x in classes]
-
-    events_n = {}
-    all_class_ids = [c[0] for c in classes]
-
-    for name, info in events.items():
-        ii = dict(info)
-        parts = ii.get("participants", [])
-
-        # participants が空なら全クラス参加
-        if not parts:
-            parts = all_class_ids
-
-        ii["participants"] = set(parts)
-        events_n[name] = ii
-
-    return classes_t, events_n, params
-
-
-# ----------------------------
-# UI
-# ----------------------------
-st.set_page_config(page_title="スポフェス自動編成", layout="wide")
-st.title("スポフェス自動編成（リーグ分け＋時程表＋CSV出力）")
-
-st.header("① クラス設定")
-
+# 初期化
 if "class_df" not in st.session_state:
     st.session_state.class_df = make_default_class_df()
+if "class_editor_df" not in st.session_state:
+    st.session_state.class_editor_df = st.session_state.class_df.copy()
 
-if st.button("デフォルトに戻す"):
-    st.session_state.class_df = make_default_class_df()
+# ----------------------------
+# クラス設定
+# ----------------------------
+st.header("① クラス設定")
 
-edited = st.data_editor(
+st.button("デフォルトに戻す", on_click=_reset_df)
+
+st.data_editor(
     st.session_state.class_df,
+    key="class_editor_df",
+    on_change=_sync_editor_to_df,
     num_rows="dynamic",
     use_container_width=True,
     column_config={
@@ -128,11 +127,7 @@ edited = st.data_editor(
         "クラス": st.column_config.TextColumn("クラス", required=True),
         "色": st.column_config.SelectboxColumn("色", options=COLOR_OPTIONS, required=True),
     },
-    key="class_editor",
 )
-
-st.session_state.class_df = edited
-
 
 # ----------------------------
 # 実行
@@ -142,15 +137,13 @@ run = st.button("スケジュール生成", type="primary")
 
 if run:
     validate_colors(st.session_state.class_df)
-
-    classes = build_classes_from_df(st.session_state.class_df)
+    classes_ui = build_classes_from_df(st.session_state.class_df)
 
     cfg = {
         **DEFAULT_CONFIG,
-        "classes": classes,
+        "classes": classes_ui,
         "per_event_parallel": 1,
     }
-
     classes, events, params = normalize_config(cfg)
 
     with st.spinner("生成中..."):
@@ -165,18 +158,17 @@ if run:
             seed=int(params.get("seed", 42)),
         )
 
-        if not info.get("success"):
-            st.error("生成に失敗しました")
-            st.code(info.get("last_error", "unknown error"))
-            st.stop()
+    if not info.get("success"):
+        st.error("生成に失敗しました")
+        st.code(info.get("last_error", "unknown error"))
+        st.stop()
 
-        st.success("生成成功！")
-        st.session_state.final_timetable = final_timetable
-        st.session_state.info = info
-        st.session_state.classes = classes
-        st.session_state.events = events
-        st.session_state.params = params
-
+    st.success("生成成功！")
+    st.session_state.final_timetable = final_timetable
+    st.session_state.info = info
+    st.session_state.classes = classes
+    st.session_state.events = events
+    st.session_state.params = params
 
 # ----------------------------
 # 結果表示
@@ -232,18 +224,10 @@ if "final_timetable" in st.session_state and "info" in st.session_state:
 
     col1, col2 = st.columns(2)
     with col1:
-        st.download_button(
-            "leagues.csv をダウンロード",
-            data=to_csv_bytes(df_leagues),
-            file_name="leagues.csv",
-            mime="text/csv"
-        )
+        st.download_button("leagues.csv をダウンロード", data=to_csv_bytes(df_leagues),
+                           file_name="leagues.csv", mime="text/csv")
     with col2:
-        st.download_button(
-            "timetable.csv をダウンロード",
-            data=to_csv_bytes(df_tt),
-            file_name="timetable.csv",
-            mime="text/csv"
-        )
+        st.download_button("timetable.csv をダウンロード", data=to_csv_bytes(df_tt),
+                           file_name="timetable.csv", mime="text/csv")
 
     st.caption(f"成功情報: {info}")
