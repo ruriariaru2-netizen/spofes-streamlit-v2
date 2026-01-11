@@ -7,27 +7,6 @@ Original file is located at
     https://colab.research.google.com/drive/12ZbzS5QwU_vtViS1Jqxxs5E11WjC4YmK
 """
 
-classes = [
-    ("1A", 1, "赤"), ("1B", 1, "青"), ("1C", 1, "黄"),
-    ("1D", 1, "赤"), ("1E", 1, "青"), ("1F", 1, "黄"),
-    ("1G", 1, "赤"), ("1H", 1, "青"), ("1I", 1, "黄"),
-    ("2A", 2, "赤"), ("2B", 2, "青"), ("2C", 2, "黄"),
-    ("2D", 2, "赤"), ("2E", 2, "青"), ("2F", 2, "黄"),
-    ("2G", 2, "赤"), ("2H", 2, "青"), ("2I", 2, "黄"),
-    ("3A", 3, "赤"), ("3B", 3, "青"), ("3C", 3, "黄"),
-    ("3D", 3, "赤"), ("3E", 3, "青"), ("3F", 3, "黄"),
-    ("3G", 3, "赤"), ("3H", 3, "青"), ("3I", 3, "黄"),
-]
-
-events = {
-  "リレー(男子)": {"participants": {"1A", "1B", "1C","2A","2B","2C","2D","3A","3B", "3C"}, "gender": "M", "min_teams": 3, "parallel": 2,"min_games": 3,"tournament_max_teams": 6},
-  "リレー(女子)": {"participants": {"1A","1D", "1E", "1F","2D","2E","2F","3A","3D","3E", "3F"}, "gender": "F", "min_teams": 3, "parallel": 2},
-  "ドッジ(女子)": {"participants": {"1G","1H", "1I", "2G","2H","2I","3G","3H","3I"}, "gender": "F", "min_teams": 3, "parallel": 2,"tournament_max_teams": 6},
-  "綱引き(混合)": {"participants": {"1B","1H","2A","2E","3B","3I"}, "gender": "X", "min_teams": 3, "parallel": 2,"tournament_max_teams": 4},
-}
-
-MATCH_MIN = 5
-CHANGE_MIN = 3
 
 """# このブロックはいじらないでください"""
 
@@ -1395,12 +1374,6 @@ def export_leagues_and_timetable_csv(events, classes, final_timetable, info,
 
     print(f"✅ 書き出しました: {leagues_csv}, {timetable_csv}")
 
-
-# ---- 実行（成功時）----
-if info.get("success"):
-    export_leagues_and_timetable_csv(events, classes, final_timetable, info,
-                                     leagues_csv="leagues.csv",
-                                     timetable_csv="timetable.csv")
 
 # scheduler.py の末尾に追加（ファイルに書かず DataFrame を返す版）
 import pandas as pd
