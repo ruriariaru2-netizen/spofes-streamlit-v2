@@ -1334,65 +1334,6 @@ def try_build_parallel_timetable_with_retries_v2(
         "last_error": last_error,
     }
 
-"""# 実行"""
-
-def debug_consolation_games_v2(events, classes, league_seed=42):
-    """
-    改善版：同じ順位同士で対戦する敗者戦の確認
-    """
-    print("\n【敗者戦の確認（同じ順位同士）】")
-    print("=" * 70)
-
-    for event_name, event_info in events.items():
-        print(f"\n{event_name}:")
-
-        ev = make_event_schedule(event_name, event_info, classes, league_seed=league_seed)
-
-        print(f"  リーグ分け:")
-        for L, teams in sorted(ev["leagues"].items()):
-            print(f"    {L}: {teams}")
-
-        print(f"  本選サイズ: {ev.get('tournament_size', 'N/A')}")
-
-        cons_games = ev["consolation_games"]
-        print(f"  敗者戦試合数: {len(cons_games)}")
-
-        if cons_games:
-            print(f"  敗者戦内容:")
-            for game in cons_games:
-                a, b = game["teams"]
-                print(f"    - {game['name']}: {a} vs {b}")
-        else:
-            print(f"  敗者戦なし（全チームが最低試合数を満たす）")
-
-        # 試合数の統計
-        print(f"  試合数統計:")
-        # リーグごとのサイズを確認
-        for L, teams in sorted(ev["leagues"].items()):
-            m = len(teams)
-            prelim_games = m - 1
-            print(f"    {L}: {m}チーム × 予選{prelim_games}試合 = {m * prelim_games}試合")
-
-# デバッグ実行
-debug_consolation_games_v2(events, classes, league_seed=42)
-
-# その後、通常実行
-final_timetable, info = try_build_parallel_timetable_with_retries_v2(
-    events, classes,
-    start_time="09:00",
-    match_min=5,
-    change_min=3,
-    lookahead=20,
-    league_attempts=30,
-    seed=42
-)
-
-if info["success"]:
-    print("✅ 成功！")
-    print_timetable(final_timetable, title="【同時並行スケジュール】")
-else:
-    print("❌ 失敗")
-    print(info["last_error"])
 
 import csv
 
@@ -1460,3 +1401,57 @@ if info.get("success"):
     export_leagues_and_timetable_csv(events, classes, final_timetable, info,
                                      leagues_csv="leagues.csv",
                                      timetable_csv="timetable.csv")
+
+# scheduler.py の末尾に追加（ファイルに書かず DataFrame を返す版）
+import pandas as pd
+
+def export_leagues_and_timetable_dfs(events, classes, final_timetable, info):
+    """
+    returns:
+      leagues_df: columns=[event, league, team]
+      timetable_df: columns=[slot_no, start, end, event, name, team_a, team_b, referee, phase, gender]
+    """
+    if not info.get("success"):
+        raise RuntimeError("スケジュール生成が成功していないため、出力できません。")
+
+    league_seed = info.get("league_seed", 0)
+    all_event_results = [
+        make_event_schedule(event_name, event_info, classes, league_seed=league_seed)
+        for event_name, event_info in events.items()
+    ]
+
+    leagues_rows = []
+    for ev in sorted(all_event_results, key=lambda x: x["event"]):
+        ev_name = ev["event"]
+        for L in sorted(ev["leagues"].keys()):
+            for team in ev["leagues"][L]:
+                leagues_rows.append([ev_name, L, team])
+
+    leagues_df = pd.DataFrame(leagues_rows, columns=["event", "league", "team"])
+
+    tt_rows = []
+    for slot_no, slot in enumerate(final_timetable, start=1):
+        if not slot:
+            continue
+        for g in slot:
+            a, b = g.get("display_teams", g.get("teams", (None, None)))
+            tt_rows.append([
+                slot_no,
+                g.get("start", ""),
+                g.get("end", ""),
+                g.get("event", ""),
+                g.get("name", ""),
+                "" if a is None else str(a),
+                "" if b is None else str(b),
+                g.get("referee", ""),
+                g.get("phase", ""),
+                g.get("gender", ""),
+            ])
+
+    timetable_df = pd.DataFrame(
+        tt_rows,
+        columns=["slot_no","start","end","event","name","team_a","team_b","referee","phase","gender"]
+    )
+
+    return leagues_df, timetable_df
+
