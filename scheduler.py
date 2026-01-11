@@ -14,7 +14,6 @@ from collections import defaultdict
 import random
 import itertools
 import math
-from collections import defaultdict
 from collections import deque
 
 """## 時刻"""
@@ -92,8 +91,6 @@ def game_teams_only(game):
 """## 予選"""
 
 import string
-import random
-
 def split_into_leagues_by_min_teams(participants, min_teams, seed=0):
     """
     participants: list[str]
@@ -427,7 +424,6 @@ def make_consolation_from_losers_by_rank(event_name, gender, losers_by_rank):
 
 """## 敗者戦"""
 
-import re
 
 def count_games_per_team(all_event_results):
     """
@@ -450,6 +446,105 @@ def count_games_per_team(all_event_results):
 
     return game_count_by_event
 
+def verify_min_games(all_event_results, consolation_games_by_event, min_games=3):
+    """
+    各チームの試合数（予選+敗者戦+本選）を確認（順位ラベルベース）
+    最低試合数に満たないチームを警告
+
+    重要：
+    - 順位ラベル（A1位、B2位など）ベースでカウント
+    - 予選での試合数は、所属リーグのサイズから計算
+    - 敗者戦・本選は実際のラベルでカウント
+
+    戻り値: {event_name: {team_label: actual_games}}
+    """
+    game_count = defaultdict(lambda: defaultdict(int))
+
+    # ========== ステップ1：予選での試合数を順位ラベルで記録 ==========
+    # リーグ内総当たり：m位のチームは (m-1) 試合
+    for ev in all_event_results:
+        event_name = ev["event"]
+        for league_name, teams in ev["leagues"].items():
+            games_per_team = len(teams) - 1
+            # 各位（1位、2位、3位...）に games_per_team 試合を加算
+            for rank in range(1, len(teams) + 1):
+                label = f"{league_name}{rank}位"
+                game_count[event_name][label] += games_per_team
+
+    # ========== ステップ2：敗者戦での試合数 ==========
+    losers_set = set()  # 敗者戦に出るラベル
+
+    for event_name, cons_games in consolation_games_by_event.items():
+        for game in cons_games:
+            for team in game.get("teams", (None, None)):
+                if team:
+                    game_count[event_name][team] += 1
+                    losers_set.add(team)
+
+    # ========== ステップ3：本選での試合数（本選に進むチームのみ） ==========
+    for ev in all_event_results:
+        event_name = ev["event"]
+        tournament_size = ev.get("tournament_size", 0)
+
+        if tournament_size >= 2:
+            n = int(tournament_size or 0)
+            p = 1
+            while p < n:
+                p *= 2
+
+            # 本選のラウンド数を計算
+            num_rounds = 0
+            temp = p
+            while temp >= 2:
+                num_rounds += 1
+                temp //= 2
+
+            # 本選に進むシード
+            seeds = build_seeds_from_leagues(ev["leagues"], p)
+
+            # 本選に進むチーム（最大n個のシード）
+            for i, seed in enumerate(seeds[:n]):
+                if seed and seed not in losers_set:
+                    # 本選に進み、敗者戦には出ないチーム
+                    game_count[event_name][seed] += num_rounds
+
+    # ========== ステップ4：警告と詳細表示 ==========
+    warnings = []
+
+    print("\n【試合数確認】")
+    print("=" * 70)
+
+    for event_name in sorted(game_count.keys()):
+        print(f"\n{event_name}:")
+
+        for label in sorted(game_count[event_name].keys()):
+            count = game_count[event_name][label]
+            status = "✅" if count >= min_games else "⚠️"
+
+            # どの段階に参加しているか表示
+            if label in losers_set:
+                stage = "（予選+敗者戦）"
+            else:
+                stage = "（予選+本選）"
+
+            print(f"  {status} {label}: {count} 試合{stage}")
+
+            if count < min_games:
+                warnings.append(
+                    f"警告: {event_name} の {label} は {count} 試合（最低 {min_games} 試合必要）"
+                )
+
+    # 最終判定
+    print("\n" + "=" * 70)
+    if warnings:
+        print("❌ 以下のチームが最低試合数を満たしていません:")
+        for w in warnings:
+            print(f"  {w}")
+    else:
+        print(f"✅ 全チームが最低 {min_games} 試合以上確保されました")
+
+    return dict(game_count)
+    
 def verify_min_games(all_event_results, consolation_games_by_event, min_games=3):
     """
     各チームの試合数（予選+敗者戦+本選）を確認（順位ラベルベース）
@@ -634,7 +729,6 @@ def build_event_queues(all_event_results, seed=0):
 
     return league_q, tourn_q
 
-import random
 
 def pick_k_games_from_queue(q, k, forbidden, lookahead, rng=None, topn=20, pair_trials=200):
     """
@@ -903,42 +997,6 @@ def schedule_leagues_parallel_flexible_backtracking(
 
     return raw
 
-def schedule_consolations_parallel_strict(cons_q, cons_parallel_map, fill_with_empty=True):
-    """
-    敗者戦を「本選と同じ考え方」で横並びにする。
-
-    - 各 event について、pe(=consolation_parallel) 個ずつに分割して stream を作る
-    - 各時程で、全 event から 1つずつ stream を取り出して結合（横並び）
-    - ある event が先に尽きたら、その event は空（=何も出さない）
-    """
-    events = list(cons_q.keys())
-
-    streams = {}
-    idx = {}
-    for e in events:
-        pe = int(cons_parallel_map.get(e, 1))
-        g = cons_q[e]
-        streams[e] = [g[i:i+pe] for i in range(0, len(g), pe)]
-        idx[e] = 0
-
-    out = []
-    while True:
-        if all(idx[e] >= len(streams[e]) for e in events):
-            break
-
-        slot = []
-        for e in events:
-            if idx[e] < len(streams[e]):
-                slot.extend(streams[e][idx[e]])
-                idx[e] += 1
-            else:
-                if fill_with_empty:
-                    pass
-
-        if slot:
-            out.append(slot)
-
-    return out
 
 def schedule_tournaments_parallel_strict(tourn_q, per_event_parallel=2, fill_with_bye=True):
     """
