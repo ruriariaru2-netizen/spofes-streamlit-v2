@@ -19,8 +19,14 @@ def fetch_payload(gas_url: str, year: str | None):
         params["year"] = year.strip()
 
     r = requests.get(gas_url, params=params, timeout=30)
+    
+    st.write("status_code:", r.status_code)
+    st.write("content_type:", r.headers.get("content-type"))
+    st.text("body (first 300 chars):\n" + r.text[:300])
+    
     r.raise_for_status()
     data = r.json()
+
 
     if not isinstance(data, dict) or "ok" not in data:
         raise ValueError("GASの返り値が想定形式ではありません（okが無い）")
