@@ -1179,40 +1179,30 @@ def try_build_parallel_timetable_with_retries_v2(
     change_min=3,
     lookahead=20,
     league_attempts=30,
-    seed=0
+    seed=0,
+    # ★追加
+    tournament_start_time="13:00",
+    enforce_tournament_start=True,
+    min_games=3,
 ):
-    """
-    シンプル版リトライロジック：
-    - league_seed だけで何度も試す
-    - lookahead は一定（増やさない）
-    - schedule_attempts は不要
-
-    戻り値: (timetable, info_dict)
-    """
     rng = random.Random(seed)
     last_error = None
-    prev_leagues = {}  # 同じリーグ分けの重複検出用
+    prev_leagues = {}
 
     for la in range(league_attempts):
         league_seed = seed + la * 10007 + rng.randint(0, 9999)
 
-        # ========== リーグ分けを作成 ==========
         all_event_results = []
         for event_name, event_info in events.items():
             all_event_results.append(
                 make_event_schedule(event_name, event_info, classes, league_seed=league_seed)
             )
 
-        # ========== リーグ分けが前回と同じかチェック ==========
         current_leagues = {ev["event"]: ev["leagues"] for ev in all_event_results}
-
         if current_leagues == prev_leagues:
-            # 同じリーグ分けになった→スキップして次を試す
             continue
-
         prev_leagues = current_leagues
 
-        # ========== スケジューリングに挑戦（lookahead固定） ==========
         schedule_seed = league_seed + 97
 
         try:
@@ -1224,9 +1214,10 @@ def try_build_parallel_timetable_with_retries_v2(
                 change_min=change_min,
                 lookahead=lookahead,
                 seed=schedule_seed,
-                tournament_start_time="13:00",
-                enforce_tournament_start=True,
-                min_games=3,
+                # ★ここはそのままでOK
+                tournament_start_time=tournament_start_time,
+                enforce_tournament_start=enforce_tournament_start,
+                min_games=min_games,
             )
 
             return tt, {
@@ -1239,7 +1230,6 @@ def try_build_parallel_timetable_with_retries_v2(
 
         except RuntimeError as e:
             last_error = str(e)
-            # lookahead を増やさず、単に次の league_seed を試す
             continue
 
     return None, {
@@ -1247,6 +1237,7 @@ def try_build_parallel_timetable_with_retries_v2(
         "league_attempts": league_attempts,
         "last_error": last_error,
     }
+
 
 
 import csv
