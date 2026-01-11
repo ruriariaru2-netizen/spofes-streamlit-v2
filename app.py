@@ -14,9 +14,34 @@ import io
 import json
 import pandas as pd
 import streamlit as st
+import string
+
 
 # あなたのエンジンをimport（ファイル名に合わせて変更）
 import spofes_engine as eng
+GRADE_OPTIONS = [1, 2, 3]
+COLOR_OPTIONS = ["赤", "青", "黄", "緑", "白", "黒", "桃", "紫", "橙"]
+
+def make_default_class_df(default_color="赤"):
+    rows = []
+    for letter in list(string.ascii_uppercase[:10]):  # 1年 A-J
+        rows.append({"学年": 1, "クラス": letter, "色": default_color})
+    for letter in list(string.ascii_uppercase[:9]):   # 2年 A-I
+        rows.append({"学年": 2, "クラス": letter, "色": default_color})
+    for letter in list(string.ascii_uppercase[:9]):   # 3年 A-I
+        rows.append({"学年": 3, "クラス": letter, "色": default_color})
+    return pd.DataFrame(rows)
+
+def build_classes_from_df(df):
+    classes = []
+    for _, r in df.iterrows():
+        g = str(r["学年"]).strip()
+        c = str(r["クラス"]).strip().upper()
+        color = str(r["色"]).strip()
+        if not g or not c or not color:
+            continue
+        classes.append([f"{g}{c}", int(g), color])
+    return classes
 
 st.set_page_config(page_title="スポフェス自動編成", layout="wide")
 
@@ -25,7 +50,31 @@ st.title("スポフェス自動編成（リーグ分け＋時程表＋CSV出力�
 # ----------------------------
 # 入力：JSONアップロード or テンプレ
 # ----------------------------
-st.sidebar.header("設定")
+st.header("① クラス設定")
+
+if "class_df" not in st.session_state:
+    st.session_state.class_df = make_default_class_df()
+
+if st.button("デフォルトに戻す"):
+    st.session_state.class_df = make_default_class_df()
+
+edited = st.data_editor(
+    st.session_state.class_df,
+    num_rows="dynamic",
+    use_container_width=True,
+    column_config={
+        "学年": st.column_config.SelectboxColumn("学年", options=GRADE_OPTIONS, required=True),
+        "クラス": st.column_config.TextColumn("クラス", help="A, B, C ...", required=True),
+        "色": st.column_config.SelectboxColumn("色", options=COLOR_OPTIONS, required=True),
+    },
+)
+
+st.session_state.class_df = edited
+classes_ui = build_classes_from_df(st.session_state.class_df)
+
+st.caption("内部で使うクラスID（学年+クラス）")
+st.write([c[0] for c in classes_ui])
+
 
 DEFAULT_CONFIG = {
     "classes": [
@@ -91,6 +140,12 @@ with colB:
     )
 
 cfg = st.session_state.config
+# UIで作ったクラスを config に上書き
+cfg["classes"] = classes_ui
+st.session_state.config = cfg
+
+# JSONが無いときの保険（前にうまくいった設定）
+cfg.setdefault("per_event_parallel", 1)
 
 # ----------------------------
 # 入力チェック（軽め）
@@ -100,19 +155,25 @@ def normalize_config(cfg: dict):
     events = cfg.get("events", {})
     params = cfg.get("params", {})
 
-    # classes: list[list] -> list[tuple] に
+    # classes: list[list] -> list[tuple]
     classes_t = [tuple(x) for x in classes]
 
-    # events participants: list化（setだとJSONに乗らない）
     events_n = {}
+    all_class_ids = [c[0] for c in classes]
+
     for name, info in events.items():
         ii = dict(info)
         parts = ii.get("participants", [])
-        # エンジン側が set を想定していても対応できるよう set に変換
+
+        # participants が空なら全クラス参加
+        if not parts:
+            parts = all_class_ids
+
         ii["participants"] = set(parts)
         events_n[name] = ii
 
     return classes_t, events_n, params
+
 
 try:
     classes, events, params = normalize_config(cfg)
