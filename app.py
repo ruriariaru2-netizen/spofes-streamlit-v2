@@ -20,9 +20,9 @@ import string
 # あなたのエンジンをimport（ファイル名に合わせて変更）
 import spofes_engine as eng
 GRADE_OPTIONS = [1, 2, 3]
-COLOR_OPTIONS = ["赤", "青", "黄", "緑", "白", "黒", "桃", "紫", "橙"]
+COLOR_OPTIONS = ["", "赤", "青", "黄"]
 
-def make_default_class_df(default_color="赤"):
+def make_default_class_df(default_color=""):
     rows = []
     for letter in list(string.ascii_uppercase[:10]):  # 1年 A-J
         rows.append({"学年": 1, "クラス": letter, "色": default_color})
@@ -42,6 +42,24 @@ def build_classes_from_df(df):
             continue
         classes.append([f"{g}{c}", int(g), color])
     return classes
+
+def validate_colors(df: pd.DataFrame):
+    """
+    色が未入力のクラスがあればエラーにする
+    """
+    missing = df[df["色"].astype(str).str.strip() == ""]
+
+    if not missing.empty:
+        names = [
+            f'{int(r["学年"])}{r["クラス"]}'
+            for _, r in missing.iterrows()
+        ]
+        st.error(
+            "❌ 色が未入力のクラスがあります。\n\n"
+            + "・" + "\n・".join(names)
+        )
+        st.stop()
+
 
 st.set_page_config(page_title="スポフェス自動編成", layout="wide")
 
@@ -71,9 +89,6 @@ edited = st.data_editor(
 
 st.session_state.class_df = edited
 classes_ui = build_classes_from_df(st.session_state.class_df)
-
-st.caption("内部で使うクラスID（学年+クラス）")
-st.write([c[0] for c in classes_ui])
 
 
 DEFAULT_CONFIG = {
@@ -189,6 +204,9 @@ st.subheader("実行")
 run = st.button("スケジュール生成", type="primary")
 
 if run:
+    # 🔴 色未入力チェック
+    validate_colors(st.session_state.class_df)
+
     with st.spinner("生成中..."):
         try:
             final_timetable, info = eng.try_build_parallel_timetable_with_retries_v2(
