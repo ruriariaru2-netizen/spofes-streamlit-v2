@@ -31,22 +31,22 @@ def fetch_payload(gas_url: str, year: str) -> dict:
     return data["payload"]
 
 
-def build_schedule_locally(payload: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    payload = {classes, events, params, tournamentId} を受け取り、
-    あなたのスケジューラ関数で timetable/leagues を作る想定。
+from scheduler import try_build_parallel_timetable_with_retries_v2, export_leagues_and_timetable_dfs
 
-    ここは「あなたの既存コード（scheduler.py相当）」をimportして呼び出す。
-    """
-    # --- ここを自分の関数に合わせてimport/呼び出ししてね ---
-    # from scheduler import try_build_parallel_timetable_with_retries_v2, export_leagues_and_timetable_dfs
-    # tt, info = try_build_parallel_timetable_with_retries_v2(payload["events"], payload["classes"], **payload["params"])
-    # leagues_df, timetable_df = export_leagues_and_timetable_dfs(payload["events"], payload["classes"], tt, info)
-    # return leagues_df, timetable_df
-
-    raise NotImplementedError(
-        "build_schedule_locally() の中を、あなたのスケジューラ呼び出しに置き換えてください。"
+def build_schedule_locally(payload: dict):
+    tt, info = try_build_parallel_timetable_with_retries_v2(
+        payload["events"],
+        payload["classes"],
+        **payload["params"]
     )
+    leagues_df, timetable_df = export_leagues_and_timetable_dfs(
+        payload["events"],
+        payload["classes"],
+        tt,
+        info
+    )
+    return leagues_df, timetable_df
+
 
 
 # =========================
