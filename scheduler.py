@@ -446,203 +446,80 @@ def count_games_per_team(all_event_results):
 
     return game_count_by_event
 
-def verify_min_games(all_event_results, consolation_games_by_event, min_games=3):
+from collections import defaultdict
+
+def verify_min_games_v2(all_event_results, min_games=3, verbose=True):
     """
-    各チームの試合数（予選+敗者戦+本選）を確認（順位ラベルベース）
-    最低試合数に満たないチームを警告
+    今の仕様（advancers / losers_by_rank / consolation_games）に対応した試合数チェック。
 
-    重要：
-    - 順位ラベル（A1位、B2位など）ベースでカウント
-    - 予選での試合数は、所属リーグのサイズから計算
-    - 敗者戦・本選は実際のラベルでカウント
+    数え方（順位ラベルベース）:
+    - 予選: リーグ内総当たり → そのリーグの順位ラベルは (リーグ人数 - 1) 試合
+    - 敗者戦: consolation_games に出た順位ラベルは 1試合ずつ加算（総当たり3も3試合として数える）
+    - 本選: advancers に入った順位ラベルは「最低1試合」加算（初戦が必ずある想定）
+      ※勝ち進み分は最小保証では不明なので数えない（必要なら拡張可能）
 
-    戻り値: {event_name: {team_label: actual_games}}
+    戻り値:
+      game_count: {event_name: {label: count}}
+      warnings: [str, ...]
     """
     game_count = defaultdict(lambda: defaultdict(int))
-
-    # ========== ステップ1：予選での試合数を順位ラベルで記録 ==========
-    # リーグ内総当たり：m位のチームは (m-1) 試合
-    for ev in all_event_results:
-        event_name = ev["event"]
-        for league_name, teams in ev["leagues"].items():
-            games_per_team = len(teams) - 1
-            # 各位（1位、2位、3位...）に games_per_team 試合を加算
-            for rank in range(1, len(teams) + 1):
-                label = f"{league_name}{rank}位"
-                game_count[event_name][label] += games_per_team
-
-    # ========== ステップ2：敗者戦での試合数 ==========
-    losers_set = set()  # 敗者戦に出るラベル
-
-    for event_name, cons_games in consolation_games_by_event.items():
-        for game in cons_games:
-            for team in game.get("teams", (None, None)):
-                if team:
-                    game_count[event_name][team] += 1
-                    losers_set.add(team)
-
-    # ========== ステップ3：本選での試合数（本選に進むチームのみ） ==========
-    for ev in all_event_results:
-        event_name = ev["event"]
-        tournament_size = ev.get("tournament_size", 0)
-
-        if tournament_size >= 2:
-            n = int(tournament_size or 0)
-            p = 1
-            while p < n:
-                p *= 2
-
-            # 本選のラウンド数を計算
-            num_rounds = 0
-            temp = p
-            while temp >= 2:
-                num_rounds += 1
-                temp //= 2
-
-            # 本選に進むシード
-            seeds = build_seeds_from_leagues(ev["leagues"], p)
-
-            # 本選に進むチーム（最大n個のシード）
-            for i, seed in enumerate(seeds[:n]):
-                if seed and seed not in losers_set:
-                    # 本選に進み、敗者戦には出ないチーム
-                    game_count[event_name][seed] += num_rounds
-
-    # ========== ステップ4：警告と詳細表示 ==========
     warnings = []
 
-    print("\n【試合数確認】")
-    print("=" * 70)
+    for ev in all_event_results:
+        event_name = ev["event"]
+        leagues = ev.get("leagues", {})
+        advancers = set(ev.get("advancers", []))
+        consolation_games = ev.get("consolation_games", [])
 
-    for event_name in sorted(game_count.keys()):
-        print(f"\n{event_name}:")
+        # ---------- 予選 ----------
+        # 各リーグの順位ラベル（A1位..）は (リーグ人数-1) 試合
+        for L, teams in leagues.items():
+            games_per_team = max(0, len(teams) - 1)
+            for rank in range(1, len(teams) + 1):
+                label = f"{L}{rank}位"
+                game_count[event_name][label] += games_per_team
 
-        for label in sorted(game_count[event_name].keys()):
-            count = game_count[event_name][label]
-            status = "✅" if count >= min_games else "⚠️"
+        # ---------- 敗者戦 ----------
+        for g in consolation_games:
+            for t in g.get("teams", (None, None)):
+                if t:
+                    game_count[event_name][t] += 1
 
-            # どの段階に参加しているか表示
-            if label in losers_set:
-                stage = "（予選+敗者戦）"
-            else:
-                stage = "（予選+本選）"
+        # ---------- 本選（最低保証） ----------
+        # advancers は本選に出るので最低1試合を保証
+        for label in advancers:
+            if label:
+                game_count[event_name][label] += 1
 
-            print(f"  {status} {label}: {count} 試合{stage}")
-
-            if count < min_games:
+        # ---------- 警告 ----------
+        for label, cnt in sorted(game_count[event_name].items()):
+            if cnt < min_games:
                 warnings.append(
-                    f"警告: {event_name} の {label} は {count} 試合（最低 {min_games} 試合必要）"
+                    f"警告: {event_name} の {label} は {cnt} 試合（最低 {min_games} 試合必要）"
                 )
 
-    # 最終判定
-    print("\n" + "=" * 70)
-    if warnings:
-        print("❌ 以下のチームが最低試合数を満たしていません:")
-        for w in warnings:
-            print(f"  {w}")
-    else:
-        print(f"✅ 全チームが最低 {min_games} 試合以上確保されました")
+    # ---------- 表示 ----------
+    if verbose:
+        print("\n【試合数確認】")
+        print("=" * 70)
+        for event_name in sorted(game_count.keys()):
+            print(f"\n{event_name}:")
+            for label in sorted(game_count[event_name].keys()):
+                cnt = game_count[event_name][label]
+                status = "✅" if cnt >= min_games else "⚠️"
+                print(f"  {status} {label}: {cnt} 試合")
 
-    return dict(game_count)
+        print("\n" + "=" * 70)
+        if warnings:
+            print("❌ 以下のチームが最低試合数を満たしていません:")
+            for w in warnings:
+                print(f"  {w}")
+        else:
+            print(f"✅ 全チームが最低 {min_games} 試合以上確保されました")
+
+    return dict(game_count), warnings
+
     
-def verify_min_games(all_event_results, consolation_games_by_event, min_games=3):
-    """
-    各チームの試合数（予選+敗者戦+本選）を確認（順位ラベルベース）
-    最低試合数に満たないチームを警告
-
-    重要：
-    - 順位ラベル（A1位、B2位など）ベースでカウント
-    - 予選での試合数は、所属リーグのサイズから計算
-    - 敗者戦・本選は実際のラベルでカウント
-
-    戻り値: {event_name: {team_label: actual_games}}
-    """
-    game_count = defaultdict(lambda: defaultdict(int))
-
-    # ========== ステップ1：予選での試合数を順位ラベルで記録 ==========
-    # リーグ内総当たり：m位のチームは (m-1) 試合
-    for ev in all_event_results:
-        event_name = ev["event"]
-        for league_name, teams in ev["leagues"].items():
-            games_per_team = len(teams) - 1
-            # 各位（1位、2位、3位...）に games_per_team 試合を加算
-            for rank in range(1, len(teams) + 1):
-                label = f"{league_name}{rank}位"
-                game_count[event_name][label] += games_per_team
-
-    # ========== ステップ2：敗者戦での試合数 ==========
-    losers_set = set()  # 敗者戦に出るラベル
-
-    for event_name, cons_games in consolation_games_by_event.items():
-        for game in cons_games:
-            for team in game.get("teams", (None, None)):
-                if team:
-                    game_count[event_name][team] += 1
-                    losers_set.add(team)
-
-    # ========== ステップ3：本選での試合数（本選に進むチームのみ） ==========
-    for ev in all_event_results:
-        event_name = ev["event"]
-        tournament_size = ev.get("tournament_size", 0)
-
-        if tournament_size >= 2:
-            n = int(tournament_size or 0)
-            p = 1
-            while p < n:
-                p *= 2
-
-            # 本選のラウンド数を計算
-            num_rounds = 0
-            temp = p
-            while temp >= 2:
-                num_rounds += 1
-                temp //= 2
-
-            # 本選に進むシード
-            seeds = build_seeds_from_leagues(ev["leagues"], p)
-
-            # 本選に進むチーム（最大n個のシード）
-            for i, seed in enumerate(seeds[:n]):
-                if seed and seed not in losers_set:
-                    # 本選に進み、敗者戦には出ないチーム
-                    game_count[event_name][seed] += num_rounds
-
-    # ========== ステップ4：警告と詳細表示 ==========
-    warnings = []
-
-    print("\n【試合数確認】")
-    print("=" * 70)
-
-    for event_name in sorted(game_count.keys()):
-        print(f"\n{event_name}:")
-
-        for label in sorted(game_count[event_name].keys()):
-            count = game_count[event_name][label]
-            status = "✅" if count >= min_games else "⚠️"
-
-            # どの段階に参加しているか表示
-            if label in losers_set:
-                stage = "（予選+敗者戦）"
-            else:
-                stage = "（予選+本選）"
-
-            print(f"  {status} {label}: {count} 試合{stage}")
-
-            if count < min_games:
-                warnings.append(
-                    f"警告: {event_name} の {label} は {count} 試合（最低 {min_games} 試合必要）"
-                )
-
-    # 最終判定
-    print("\n" + "=" * 70)
-    if warnings:
-        print("❌ 以下のチームが最低試合数を満たしていません:")
-        for w in warnings:
-            print(f"  {w}")
-    else:
-        print(f"✅ 全チームが最低 {min_games} 試合以上確保されました")
-
-    return dict(game_count)
 
 """## スケジューリング"""
 
