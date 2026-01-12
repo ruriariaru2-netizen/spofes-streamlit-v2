@@ -1,6 +1,7 @@
 import requests
 import pandas as pd
 import streamlit as st
+import re
 
 from scheduler import (
     RobustTimetableBuilder,
