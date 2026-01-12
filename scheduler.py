@@ -768,6 +768,20 @@ class ScheduleBuilder:
             chosen = self._build_with_repair(events, needs)
         else:
             chosen = self._build_with_dfs(events, needs)
+        # ★追加：どうしても k=2 が組めないなら k=1 に落として続行
+        if chosen is None:
+            relaxed_needs = dict(needs)
+            changed = False
+            for ev in events:
+                if relaxed_needs[ev] >= 2:
+                    relaxed_needs[ev] = 1
+                    changed = True
+            if changed:
+                if self.config.enable_repair:
+                    chosen = self._build_with_repair(events, relaxed_needs)
+                else:
+                    chosen = self._build_with_dfs(events, relaxed_needs)
+                needs = relaxed_needs  # 後段の削除に合わせる
 
         if chosen is None:
             failures = {ev: f"{needs[ev]}試合必要" for ev in events}
