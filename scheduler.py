@@ -1016,7 +1016,7 @@ def schedule_leagues_parallel_flexible_backtracking(
         if enable_cooldown:
             new_cd = set()
             for g in slot_games:
-                new_cd |= game_player_resources_for_cooldown(g)
+                new_cd |= game_player_resources(g)
             cooldown_forbidden = new_cd
 
     return raw
