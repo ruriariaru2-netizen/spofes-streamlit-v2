@@ -207,7 +207,7 @@ class LeagueManager:
         rng.shuffle(parts)
 
         N = len(parts)
-        k = min_teams
+        k = max(2, min_teams)
 
         if N < k:
             return {"A": parts}
@@ -1296,6 +1296,11 @@ class EventScheduler:
         consolation_games = TournamentManager.make_consolation_games(
             event_name, gender, losers_by_rank
         )
+        if len(league_games) == 0 and len(participants) >= 2:
+            print(f"[WARN] {event_name}: 予選試合が0件")
+            print("  participants:", participants)
+            print("  min_teams:", min_teams)
+            print("  leagues:", {L: len(ts) for L, ts in leagues.items()})
 
         return {
             "event": event_name,
@@ -1365,6 +1370,9 @@ class TimetableBuilder:
             seed=league_seed + 97,
         )
         prelim_raw = builder.build()
+        if sum(len(slot) for slot in prelim_raw) == 0:
+            raise RuntimeError("予選+敗者戦の試合が0件です（入力/リーグ分けを確認）")
+
 
         # ステップ4：本選開始時刻の調整
         after_prelim = TimeManager.end_time_after_slots(
