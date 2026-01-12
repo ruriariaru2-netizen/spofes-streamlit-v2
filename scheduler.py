@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+    # -*- coding: utf-8 -*-
 """
 スポーツ大会スケジューリングシステム（リファクタリング版）
 責務分離・クラス化により保守性を向上
@@ -12,7 +12,7 @@ import string
 import re
 import csv
 import pandas as pd
-
+import copy
 
 # ============================================================
 # Config（設定の外部化）
@@ -40,6 +40,13 @@ class ScheduleConfig:
     enable_repair: bool = True
     league_attempts: int = 30
     min_games: int = 3
+    # ★追加：repair の方式
+    # "slot"  : いまの方式（各slotごとに衝突修理）
+    # "global": まず全体を並べてから、同一event内swapで修理（あなたがやりたい方式）
+    repair_mode: str = "global"
+    global_repair_iters: int = 3000
+    global_repair_max_tries_per_conflict: int = 200
+    allow_insert_empty_slot: bool = True
 
 
 # ============================================================
@@ -656,18 +663,25 @@ class ScheduleBuilder:
     ):
         self.league_q = {e: list(q) for e, q in league_queues.items()}
         self.per_event_parallel = per_event_parallel
-        self.per_event_parallel_consolation = (
-            per_event_parallel_consolation or {}
-        )
+        self.per_event_parallel_consolation = per_event_parallel_consolation or {}
         self.config = config
         self.rng = random.Random(seed)
         self.selector = GameSelector(self.rng, config)
-        self.result = []
-        self.cooldown_forbidden = set()
+        self.result: List[List[dict]] = []
+        self.cooldown_forbidden: Set[str] = set()
 
     def build(self) -> List[List[dict]]:
         """スケジュール組立を実行"""
+        if self.config.enable_repair and self.config.repair_mode == "global":
+            return self._build_global_then_repair()
+        return self._build_slot_by_slot()
+
+    # -----------------------------
+    # 旧方式：slot-by-slot
+    # -----------------------------
+    def _build_slot_by_slot(self) -> List[List[dict]]:
         slot_no = 0
+        self.result = []
         while self._has_remaining_games():
             slot_no += 1
             slot = self._build_slot(slot_no)
@@ -675,8 +689,65 @@ class ScheduleBuilder:
             self._update_cooldown(slot)
         return self.result
 
+    # -----------------------------
+    # 新方式：global placement → repair
+    # -----------------------------
+    def _build_global_then_repair(self) -> List[List[dict]]:
+        initial = self._build_initial_timetable_ignore_conflicts()
+        repaired = GlobalTimetableRepairer(
+            rng=self.rng,
+            config=self.config,
+        ).repair(initial)
+        return repaired
+
     def _has_remaining_games(self) -> bool:
         return any(len(self.league_q[e]) > 0 for e in self.league_q.keys())
+
+    def _build_initial_timetable_ignore_conflicts(self) -> List[List[dict]]:
+        """
+        ★新方式の初期配置：
+        - eventごとに parallel 単位で機械的に切り出して slot列を作る
+        - その後、時程番号でzipして全体timetableを作る
+        - phaseは混ぜない（queue順：prelimの後にconsolation）
+        - 衝突やcooldownは無視（後でrepair）
+        """
+        per_event_slots: Dict[str, List[List[dict]]] = {}
+
+        for ev, q in self.league_q.items():
+            slots: List[List[dict]] = []
+
+            i = 0
+            while i < len(q):
+                phase = q[i].get("phase")
+                k = self._get_parallel(ev, phase == "consolation")
+
+                chunk: List[dict] = []
+                while i < len(q) and len(chunk) < k and q[i].get("phase") == phase:
+                    chunk.append(q[i])
+                    i += 1
+
+                if chunk:
+                    slots.append(chunk)
+
+            per_event_slots[ev] = slots
+
+        # 時程番号で合体（event間を横に合体）
+        timetable: List[List[dict]] = []
+        t = 0
+        events = list(per_event_slots.keys())
+        while any(t < len(per_event_slots[ev]) for ev in events):
+            slot: List[dict] = []
+            for ev in events:
+                if t < len(per_event_slots[ev]):
+                    slot.extend(per_event_slots[ev][t])
+            timetable.append(slot)
+            t += 1
+
+        # 初期配置が終わったので league_q は空扱いにする
+        for ev in self.league_q:
+            self.league_q[ev] = []
+
+        return timetable
 
     def _build_slot(self, slot_no: int) -> List[dict]:
         """1時程を組み立てる"""
@@ -686,7 +757,6 @@ class ScheduleBuilder:
 
         self.rng.shuffle(events)
 
-        # 各種目の必要試合数
         needs = {}
         for ev in events:
             q = self.league_q[ev]
@@ -694,7 +764,6 @@ class ScheduleBuilder:
             pe = self._get_parallel(ev, is_consolation)
             needs[ev] = min(pe, len(q))
 
-        # repair機構で組立
         if self.config.enable_repair:
             chosen = self._build_with_repair(events, needs)
         else:
@@ -704,8 +773,7 @@ class ScheduleBuilder:
             failures = {ev: f"{needs[ev]}試合必要" for ev in events}
             raise ScheduleError(slot_no, events, failures)
 
-        # キューから削除
-        slot_games = []
+        slot_games: List[dict] = []
         for ev in events:
             idxs, games, _ = chosen[ev]
             for i in sorted(idxs, reverse=True):
@@ -715,7 +783,6 @@ class ScheduleBuilder:
         return slot_games
 
     def _get_parallel(self, event: str, is_consolation: bool) -> int:
-        """種目の並列数を取得"""
         if is_consolation:
             return self.per_event_parallel_consolation.get(event, 1)
         return self.per_event_parallel.get(event, 2)
@@ -723,12 +790,8 @@ class ScheduleBuilder:
     def _build_with_repair(
         self, events: List[str], needs: Dict[str, int]
     ) -> Optional[Dict[str, Tuple]]:
-        """repair機構：ランダム配置 → 衝突修理"""
-        base_forbidden = (
-            self.cooldown_forbidden if self.config.enable_cooldown else set()
-        )
+        base_forbidden = self.cooldown_forbidden if self.config.enable_cooldown else set()
 
-        # 1) 各種目をランダムに配置
         chosen = {}
         for ev in events:
             pick = self.selector.pick_k_games(
@@ -741,19 +804,16 @@ class ScheduleBuilder:
                 return None
             chosen[ev] = pick
 
-        # 2) 種目間衝突を修理
         for _ in range(self.config.repair_iters):
             if not self._has_conflicts(chosen):
                 return chosen
 
-            # 衝突してる種目を再抽選
             has_conflict, bad_events = self._get_conflict_events(chosen)
             if not has_conflict:
                 return chosen
+
             for ev in list(bad_events)[: self.config.repair_redraws]:
-                other_used = set().union(
-                    *(chosen[ev2][2] for ev2 in chosen if ev2 != ev)
-                )
+                other_used = set().union(*(chosen[e2][2] for e2 in chosen if e2 != ev))
                 pick = self.selector.pick_k_games(
                     self.league_q[ev],
                     needs[ev],
@@ -769,15 +829,11 @@ class ScheduleBuilder:
     def _build_with_dfs(
         self, events: List[str], needs: Dict[str, int]
     ) -> Optional[Dict[str, Tuple]]:
-        """DFS探索でスケジュール組立"""
-        base_forbidden = (
-            self.cooldown_forbidden if self.config.enable_cooldown else set()
-        )
-
+        base_forbidden = self.cooldown_forbidden if self.config.enable_cooldown else set()
         chosen = {}
         used_global = set()
 
-        def dfs(idx):
+        def dfs(idx: int) -> bool:
             nonlocal used_global
             if idx == len(events):
                 return True
@@ -793,12 +849,9 @@ class ScheduleBuilder:
                 return False
 
             tries = [pick]
-            # 複数候補を試す
             if k == 1:
                 for i in range(min(self.config.topn_k1, len(self.league_q[ev]))):
-                    p = self.selector.pick_k_games(
-                        self.league_q[ev], k, forbidden, i + 1
-                    )
+                    p = self.selector.pick_k_games(self.league_q[ev], k, forbidden, i + 1)
                     if p:
                         tries.append(p)
 
@@ -816,12 +869,10 @@ class ScheduleBuilder:
         return chosen if dfs(0) else None
 
     def _has_conflicts(self, chosen: Dict[str, Tuple]) -> bool:
-        """種目間の衝突をチェック"""
         has_conflict, _ = self._get_conflict_events(chosen)
         return has_conflict
 
     def _get_conflict_events(self, chosen: Dict[str, Tuple]) -> Tuple[bool, Set[str]]:
-        """衝突している種目をリスト化"""
         used_owner = {}
         conflict_events = set()
         for ev, (_, _, used) in chosen.items():
@@ -834,7 +885,6 @@ class ScheduleBuilder:
         return len(conflict_events) > 0, conflict_events
 
     def _update_cooldown(self, slot_games: List[dict]):
-        """連続禁止リソースを更新"""
         if not self.config.enable_cooldown:
             self.cooldown_forbidden = set()
             return
@@ -843,6 +893,161 @@ class ScheduleBuilder:
             new_cd |= ResourceManager.get_cooldown_resources(g)
         self.cooldown_forbidden = new_cd
 
+
+class GlobalTimetableRepairer:
+    """
+    全体を先に並べて → 衝突があったら「同一event内」swap/moveで直す
+    """
+
+    def __init__(self, rng: random.Random, config: ScheduleConfig):
+        self.rng = rng
+        self.config = config
+
+    def repair(self, timetable: List[List[dict]]) -> List[List[dict]]:
+        tt = timetable  # 破壊的に直す
+
+        def ensure_empty_slot():
+            if not self.config.allow_insert_empty_slot:
+                return None
+            tt.append([])
+            return len(tt) - 1
+
+        for _ in range(self.config.global_repair_iters):
+            conflicts = self._find_conflicts(tt)
+            if not conflicts:
+                return tt
+
+            slot_i, game_i = conflicts[self.rng.randrange(len(conflicts))]
+            if not (0 <= slot_i < len(tt)) or not (0 <= game_i < len(tt[slot_i])):
+                continue
+
+            g = tt[slot_i][game_i]
+            ev = g.get("event")
+            if not ev:
+                continue
+
+            candidate_slots = self._slots_containing_event(tt, ev)
+            if slot_i in candidate_slots:
+                candidate_slots.remove(slot_i)
+
+            if not candidate_slots:
+                empty_idx = ensure_empty_slot()
+                if empty_idx is not None:
+                    candidate_slots = [empty_idx]
+
+            self.rng.shuffle(candidate_slots)
+
+            fixed = False
+            tries = 0
+
+            for slot_j in candidate_slots:
+                if tries >= self.config.global_repair_max_tries_per_conflict:
+                    break
+                tries += 1
+
+                # move to empty slot
+                if len(tt[slot_j]) == 0:
+                    if self._move_is_ok(tt, slot_i, game_i, slot_j):
+                        self._move_game(tt, slot_i, game_i, slot_j)
+                        fixed = True
+                        break
+                    continue
+
+                # swap within same event
+                idxs2 = [k for k, h in enumerate(tt[slot_j]) if h.get("event") == ev]
+                if not idxs2:
+                    continue
+                game_j = idxs2[self.rng.randrange(len(idxs2))]
+
+                if self._swap_is_ok(tt, slot_i, game_i, slot_j, game_j):
+                    self._swap_games(tt, slot_i, game_i, slot_j, game_j)
+                    fixed = True
+                    break
+
+            if not fixed:
+                continue
+
+        return tt
+
+    def _find_conflicts(self, tt: List[List[dict]]) -> List[Tuple[int, int]]:
+        bad: List[Tuple[int, int]] = []
+        prev_cd: Set[str] = set()
+
+        for si, slot in enumerate(tt):
+            # collision
+            used = set()
+            for gi, g in enumerate(slot):
+                rset = ResourceManager.get_collision_resources(g)
+                if used & rset:
+                    bad.append((si, gi))
+                used |= rset
+
+            # cooldown
+            if self.config.enable_cooldown:
+                cur_cd = set()
+                for gi, g in enumerate(slot):
+                    cd = ResourceManager.get_cooldown_resources(g)
+                    if cd & prev_cd:
+                        bad.append((si, gi))
+                    cur_cd |= cd
+                prev_cd = cur_cd
+
+        return bad
+
+    def _slots_containing_event(self, tt: List[List[dict]], ev: str) -> List[int]:
+        return [i for i, slot in enumerate(tt) if any(g.get("event") == ev for g in slot)]
+
+    def _swap_is_ok(self, tt, si, gi, sj, gj) -> bool:
+        g1 = tt[si][gi]
+        g2 = tt[sj][gj]
+        tt[si][gi], tt[sj][gj] = g2, g1
+        ok = self._local_ok(tt, {si, sj, si - 1, si + 1, sj - 1, sj + 1})
+        tt[si][gi], tt[sj][gj] = g1, g2
+        return ok
+
+    def _move_is_ok(self, tt, si, gi, sj_empty) -> bool:
+        g1 = tt[si][gi]
+        tt[sj_empty].append(g1)
+        del tt[si][gi]
+        ok = self._local_ok(tt, {si, sj_empty, si - 1, si + 1, sj_empty - 1, sj_empty + 1})
+        tt[si].insert(gi, g1)
+        tt[sj_empty].pop()
+        return ok
+
+    def _swap_games(self, tt, si, gi, sj, gj):
+        tt[si][gi], tt[sj][gj] = tt[sj][gj], tt[si][gi]
+
+    def _move_game(self, tt, si, gi, sj_empty):
+        g1 = tt[si][gi]
+        del tt[si][gi]
+        tt[sj_empty].append(g1)
+
+    def _local_ok(self, tt: List[List[dict]], slot_indices: Set[int]) -> bool:
+        idxs = [i for i in slot_indices if 0 <= i < len(tt)]
+        idxs = sorted(set(idxs))
+
+        # collision
+        for si in idxs:
+            used = set()
+            for g in tt[si]:
+                rset = ResourceManager.get_collision_resources(g)
+                if used & rset:
+                    return False
+                used |= rset
+
+        # cooldown adjacency only
+        if self.config.enable_cooldown:
+            for si in idxs:
+                if si == 0:
+                    continue
+                prev_cd = set()
+                for g in tt[si - 1]:
+                    prev_cd |= ResourceManager.get_cooldown_resources(g)
+                for g in tt[si]:
+                    if ResourceManager.get_cooldown_resources(g) & prev_cd:
+                        return False
+
+        return True
 
 # ============================================================
 # Referee Assignment（審判割当）
@@ -1493,7 +1698,14 @@ if __name__ == "__main__":
         change_min=3,
         tournament_start_time="13:00",
     )
-    schedule_config = ScheduleConfig(lookahead=80, league_attempts=30)
+    schedule_config = ScheduleConfig(
+        lookahead=80,
+        league_attempts=30,
+        repair_mode="global",
+        global_repair_iters=5000,
+        global_repair_max_tries_per_conflict=300,
+    )
+
 
     # クラス定義
     classes = [
