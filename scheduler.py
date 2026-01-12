@@ -673,10 +673,19 @@ class ScheduleBuilder:
         self.cooldown_forbidden: Set[str] = set()
 
     def build(self) -> List[List[dict]]:
-        """スケジュール組立を実行"""
         if self.config.enable_repair and self.config.repair_mode == "global":
-            return self._build_global_then_repair()
+            try:
+                tt = self._build_global_then_repair()
+                # ここで最終チェック（0じゃなければ例外）
+                repairer = GlobalTimetableRepairer(rng=self.rng, config=self.config)
+                if len(repairer._find_conflicts(tt)) > 0:
+                    raise ScheduleError(0, [], {"GLOBAL": "衝突が残りました"})
+                return tt
+            except ScheduleError:
+                # フォールバック
+                return self._build_slot_by_slot()
         return self._build_slot_by_slot()
+
 
     def _build_slot_by_slot(self) -> List[List[dict]]:
         slot_no = 0
