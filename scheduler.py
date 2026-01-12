@@ -705,24 +705,28 @@ class ScheduleBuilder:
         best = None
         best_conflicts = 10**9
     
-        for _ in range(self.config.global_repair_restarts):
-            initial = self._build_initial_timetable_ignore_conflicts()
+        original_q = copy.deepcopy(self.league_q)
     
+        for _ in range(self.config.global_repair_restarts):
+            # ★毎回元に戻してから作る
+            self.league_q = copy.deepcopy(original_q)
+    
+            initial = self._build_initial_timetable_ignore_conflicts()
             repairer = GlobalTimetableRepairer(rng=self.rng, config=self.config)
             repaired = repairer.repair(initial)
     
-            # まだ衝突が残るかチェック
             remaining = len(repairer._find_conflicts(repaired))
             if remaining == 0:
                 return repaired
     
-            # ベスト努力：一番マシなものを保持
             if remaining < best_conflicts:
                 best_conflicts = remaining
                 best = copy.deepcopy(repaired)
+    
         if best is None:
             raise ScheduleError(0, [], {"GLOBAL": "初期配置/修理に失敗"})
         return best
+
 
     def _has_remaining_games(self) -> bool:
         return any(len(self.league_q[e]) > 0 for e in self.league_q.keys())
