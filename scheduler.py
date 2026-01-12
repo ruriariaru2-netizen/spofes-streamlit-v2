@@ -761,30 +761,91 @@ def schedule_leagues_parallel_flexible_backtracking(
     per_event_parallel_consolation=None,
     lookahead=80,
     seed=0,
-    # 残りが少なくなったら先読みを強める（終盤詰み対策）
     auto_bump_lookahead=True,
     bump_threshold=10,
     bump_lookahead=80,
+    enable_cooldown=True,
+    # ★追加：repair（ランダム→被り差し替え）設定
+    enable_repair=True,
+    repair_iters=80,      # 1時程あたりの修理回数上限
+    repair_redraws=30,    # 被り種目の引き直し回数上限
 ):
-    """
-    予選（or 敗者戦）の同時並行スケジューリング。
-
-    - 各時程で、各種目から k 試合（通常 parallel）を選ぶ
-    - 同時刻に同じリソース（男女/混合の占有）が重ならないように選ぶ
-    - バックトラックで組合せを探索
-    - 残り1試合なら1試合でOK（k=min(parallel, 残り)）
-    """
     rng = random.Random(seed)
     events = list(league_q.keys())
     raw = []
     slot_no = 0
 
-    # pick_k_games_from_queue が rng 引数を受け取る/受け取らない両対応
-    def _pick(q, k, forbidden, lookahead):
-        try:
-            return pick_k_games_from_queue(q, k, forbidden, lookahead, rng=rng)
-        except TypeError:
-            return pick_k_games_from_queue(q, k, forbidden, lookahead)
+    cooldown_forbidden = set()
+
+    def game_player_resources_for_cooldown(g):
+        if g.get("phase") == "consolation":
+            return set()
+        gender = g.get("gender", "X")
+        used = set()
+        for t in g.get("teams", (None, None)):
+            if t is None:
+                continue
+            used |= resources_of_team(t, gender)
+        return used
+
+    def pick_one_random_from_candidates(q, forbidden, lookahead_local):
+        """lookahead内から forbidden と被らない試合を1つランダムに返す (idx, game, used) or None"""
+        limit = min(lookahead_local, len(q))
+        idxs = list(range(limit))
+        rng.shuffle(idxs)
+        for i in idxs:
+            g = q[i]
+            used = game_resources_only(g)
+            if used & forbidden:
+                continue
+            return i, g, set(used)
+        return None
+
+    def pick_k_random(q, k, forbidden, lookahead_local):
+        """同一種目内で、k個をランダムに（互いに衝突しないように）選ぶ"""
+        if k <= 0:
+            return [], [], set()
+
+        limit = min(lookahead_local, len(q))
+        # 候補インデックスをシャッフル
+        idxs = list(range(limit))
+        rng.shuffle(idxs)
+
+        picked = []
+        games = []
+        used_total = set()
+
+        for i in idxs:
+            g = q[i]
+            used = game_resources_only(g)
+            if used & forbidden:
+                continue
+            if used & used_total:
+                continue
+            picked.append(i)
+            games.append(g)
+            used_total |= used
+            if len(picked) == k:
+                return sorted(picked), games, used_total
+
+        return None  # 取れない
+
+    def compute_conflicts(chosen_map):
+        """
+        chosen_map: ev -> (idxs, games, used_set)
+        return: (has_conflict, conflict_events_set)
+          conflictは「種目間」で used がぶつかることを指す（敗者戦は used が空なら自然に無視される）
+        """
+        used_owner = {}  # res -> ev
+        conflict_events = set()
+        for ev, (_, _, used) in chosen_map.items():
+            for r in used:
+                if r in used_owner and used_owner[r] != ev:
+                    conflict_events.add(ev)
+                    conflict_events.add(used_owner[r])
+                else:
+                    used_owner[r] = ev
+        return (len(conflict_events) > 0), conflict_events
 
     while True:
         if all(len(league_q[e]) == 0 for e in events):
@@ -797,6 +858,7 @@ def schedule_leagues_parallel_flexible_backtracking(
 
         slot_no += 1
 
+        # --- この時程でアクティブな種目と必要試合数kを決める ---
         need = {}
         actives = []
         for e in events:
@@ -805,91 +867,164 @@ def schedule_leagues_parallel_flexible_backtracking(
                 continue
 
             pe = per_event_parallel[e] if isinstance(per_event_parallel, dict) else per_event_parallel
-            # 先頭が敗者戦なら consolation_parallel を使う
             if league_q[e] and league_q[e][0].get("phase") == "consolation":
                 if per_event_parallel_consolation is None:
                     pe = 1
                 else:
                     pe = per_event_parallel_consolation.get(e, 1)
-            k = min(pe, r)
 
+            k = min(pe, r)
             need[e] = k
             actives.append(e)
 
         rng.shuffle(actives)
 
+        # 禁止（連続禁止）
+        base_forbidden = set()
+        if enable_cooldown and cooldown_forbidden:
+            base_forbidden |= cooldown_forbidden
+
+        # =========================================================
+        # A) repairモード：ランダムに置く → 被りが出たら差し替える
+        # =========================================================
         chosen = {}
-        used_global = set()  # resources
+        ok = False
 
-        def dfs(idx):
-            nonlocal used_global
-            if idx == len(actives):
-                return True
-
-            ev = actives[idx]
-            k = need[ev]
-            q = league_q[ev]
-
-            pick = _pick(q, k, used_global, lookahead)
-            if pick is None:
-                return False
-
-            tries = [pick]
-
-            # k==1 の揺らぎ：候補を少し増やす
-            if k == 1:
-                limit = min(lookahead, len(q))
-                idxs = list(range(limit))
-                rng.shuffle(idxs)
-                extra = 0
-                for i in idxs:
-                    g = q[i]
-                    used = game_resources_only(g)
-                    if used & used_global:
-                        continue
-                    tries.append(([i], [g], set(used)))
-                    extra += 1
-                    if extra >= 20:
-                        break
-
-            # k==2 の揺らぎ：先頭付近の回転も試す（軽め）
-            if k == 2:
-                limit = min(lookahead, len(q))
-                extra = 0
-                for start in range(min(20, limit)):
-                    rotated = [q[(start + j) % limit] for j in range(limit)]
-                    pick2 = _pick(rotated, k, used_global, lookahead=limit)
-                    if pick2 is None:
-                        continue
-                    rot_idxs, rot_games, used = pick2
-                    real_idxs = sorted([(start + ri) % limit for ri in rot_idxs])
-                    tries.append((real_idxs, rot_games, used))
-                    extra += 1
-                    if extra >= 20:
-                        break
-
-            for real_idxs, games, used in tries:
-                chosen[ev] = (real_idxs, games, used)
-                prev_used = used_global
-                used_global = used_global | used
-                if dfs(idx + 1):
-                    return True
-                used_global = prev_used
-                chosen.pop(ev, None)
-
-            return False
-
-        ok = dfs(0)
-        if not ok:
-            msg = [f"予選 flexible（バックトラック）: 時程{slot_no}で組めません。"]
-            msg.append(f"  途中までの使用リソース: {sorted(used_global)}")
+        if enable_repair:
+            # 1) まず各種目を “種目内衝突なし” でランダムに取る（種目間衝突は許す）
+            init_ok = True
             for ev in actives:
                 q = league_q[ev]
-                msg.append(f"  {ev}（この時程は{need[ev]}試合必要）の先頭10試合:")
-                for j in range(min(10, len(q))):
-                    msg.append(f"    - {q[j]['name']}: {sorted(game_teams_only(q[j]))}")
-            raise RuntimeError("\n".join(msg))
+                k = need[ev]
+                pick = pick_k_random(q, k, base_forbidden, lookahead)
+                if pick is None:
+                    init_ok = False
+                    break
+                chosen[ev] = pick
 
+            # 2) 種目間衝突を修理
+            if init_ok:
+                for _ in range(repair_iters):
+                    has_conflict, bad_events = compute_conflicts(chosen)
+                    if not has_conflict:
+                        ok = True
+                        break
+
+                    # 衝突してる種目のどれかを引き直す（できれば1つずつ）
+                    bad_list = list(bad_events)
+                    rng.shuffle(bad_list)
+
+                    repaired_any = False
+
+                    # 現在の他種目が使っているリソース（衝突解消のための禁止集合）
+                    # ※自分以外の used を集める
+                    for ev in bad_list[:repair_redraws]:
+                        other_used = set()
+                        for ev2, (_, _, used2) in chosen.items():
+                            if ev2 == ev:
+                                continue
+                            other_used |= used2
+
+                        q = league_q[ev]
+                        k = need[ev]
+                        # 「連続禁止 + 他種目のused」を禁止にして引き直す
+                        pick = pick_k_random(q, k, base_forbidden | other_used, lookahead)
+                        if pick is not None:
+                            chosen[ev] = pick
+                            repaired_any = True
+                            break  # まず1個直してループへ
+
+                    if not repaired_any:
+                        ok = False
+                        break
+
+        # =========================================================
+        # B) うまくいかなかったら、従来dfs（保険）
+        # =========================================================
+        if not ok:
+            chosen = {}
+            used_global = set()
+
+            def _pick(q, k, forbidden, lookahead_local):
+                try:
+                    return pick_k_games_from_queue(q, k, forbidden, lookahead_local, rng=rng)
+                except TypeError:
+                    return pick_k_games_from_queue(q, k, forbidden, lookahead_local)
+
+            def dfs(idx):
+                nonlocal used_global
+                if idx == len(actives):
+                    return True
+
+                ev = actives[idx]
+                k = need[ev]
+                q = league_q[ev]
+
+                forbidden = used_global | base_forbidden
+                pick = _pick(q, k, forbidden, lookahead)
+                if pick is None:
+                    return False
+
+                tries = [pick]
+
+                if k == 1:
+                    limit = min(lookahead, len(q))
+                    idxs = list(range(limit))
+                    rng.shuffle(idxs)
+                    extra = 0
+                    for i in idxs:
+                        g = q[i]
+                        used = game_resources_only(g)
+                        if used & forbidden:
+                            continue
+                        tries.append(([i], [g], set(used)))
+                        extra += 1
+                        if extra >= 20:
+                            break
+
+                if k == 2:
+                    limit = min(lookahead, len(q))
+                    extra = 0
+                    for start in range(min(20, limit)):
+                        rotated = [q[(start + j) % limit] for j in range(limit)]
+                        pick2 = _pick(rotated, k, forbidden, lookahead_local=limit)
+                        if pick2 is None:
+                            continue
+                        rot_idxs, rot_games, used = pick2
+                        real_idxs = sorted([(start + ri) % limit for ri in rot_idxs])
+                        tries.append((real_idxs, rot_games, used))
+                        extra += 1
+                        if extra >= 20:
+                            break
+
+                for real_idxs, games, used in tries:
+                    chosen[ev] = (real_idxs, games, used)
+                    prev = used_global
+                    used_global |= used
+                    if dfs(idx + 1):
+                        return True
+                    used_global = prev
+                    chosen.pop(ev, None)
+
+                return False
+
+            ok = dfs(0)
+
+            if not ok:
+                msg = [f"予選 flexible（repair+バックトラック）: 時程{slot_no}で組めません。"]
+                if enable_cooldown and cooldown_forbidden:
+                    msg.append(f"  連続禁止（前時程からの禁止）: {sorted(cooldown_forbidden)}")
+                for ev in actives:
+                    q = league_q[ev]
+                    msg.append(f"  {ev}（この時程は{need[ev]}試合必要）の先頭10試合:")
+                    for j in range(min(10, len(q))):
+                        g = q[j]
+                        msg.append(f"    - {g['name']}: {sorted(game_teams_only(g))} gender={g.get('gender','')}, phase={g.get('phase','')}")
+                raise RuntimeError("\n".join(msg))
+
+        # =========================================================
+        # C) この時程を確定し、キューから削除
+        # =========================================================
         slot_games = []
         for ev in actives:
             real_idxs, games, used = chosen[ev]
@@ -899,8 +1034,14 @@ def schedule_leagues_parallel_flexible_backtracking(
 
         raw.append(slot_games)
 
-    return raw
+        # 次時程のクールダウン更新
+        if enable_cooldown:
+            new_cd = set()
+            for g in slot_games:
+                new_cd |= game_player_resources_for_cooldown(g)
+            cooldown_forbidden = new_cd
 
+    return raw
 
 def schedule_tournaments_parallel_strict(tourn_q, per_event_parallel=2, fill_with_bye=True):
     """
