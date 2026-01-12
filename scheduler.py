@@ -352,6 +352,7 @@ class TournamentManager:
                     "gender": gender,
                     "name": mname,
                     "teams": (a, b),
+                    "phase": "tournament",
                 })
 
             raw.append(slot)
@@ -505,11 +506,19 @@ class GameSelector:
         """
         if k <= 0:
             return [], [], set()
+        if not queue:
+            return None
+
+        # ★重要：予選が残っているのに敗者戦が混ざらないよう、
+        # 先頭の phase と同じ phase の試合だけを候補にする
+        head_phase = queue[0].get("phase")
 
         limit = min(lookahead, len(queue))
         candidates = []
         for i in range(limit):
             g = queue[i]
+            if g.get("phase") != head_phase:
+                continue
             used = ResourceManager.get_collision_resources(g)
             if used & forbidden:
                 continue
@@ -738,7 +747,9 @@ class ScheduleBuilder:
                 return chosen
 
             # 衝突してる種目を再抽選
-            bad_events = self._get_conflict_events(chosen)
+            has_conflict, bad_events = self._get_conflict_events(chosen)
+            if not has_conflict:
+                return chosen
             for ev in list(bad_events)[: self.config.repair_redraws]:
                 other_used = set().union(
                     *(chosen[ev2][2] for ev2 in chosen if ev2 != ev)
@@ -806,8 +817,8 @@ class ScheduleBuilder:
 
     def _has_conflicts(self, chosen: Dict[str, Tuple]) -> bool:
         """種目間の衝突をチェック"""
-        _, _ = self._get_conflict_events(chosen)
-        return len(self._get_conflict_events(chosen)[1]) > 0
+        has_conflict, _ = self._get_conflict_events(chosen)
+        return has_conflict
 
     def _get_conflict_events(self, chosen: Dict[str, Tuple]) -> Tuple[bool, Set[str]]:
         """衝突している種目をリスト化"""
@@ -1226,12 +1237,14 @@ class RobustTimetableBuilder:
         self.schedule_config = schedule_config or ScheduleConfig()
 
     def build_with_retries(
-        self, base_seed: int = 0
+        self, base_seed: int = 0, seed: Optional[int] = None
     ) -> Tuple[Optional[List[List[dict]]], dict]:
         """リトライ付きでタイムテーブルを生成"""
         last_error = None
         prev_leagues = {}
-
+        # 互換：呼び出し側が seed=... を渡してきた場合は base_seed として扱う
+        if seed is not None:
+            base_seed = seed
         for attempt in range(self.schedule_config.league_attempts):
             league_seed = base_seed + attempt * 10007
 
@@ -1254,6 +1267,7 @@ class RobustTimetableBuilder:
                 prev_leagues = current_leagues
 
                 return tt, {
+                    **info,
                     "success": True,
                     "league_attempt": attempt,
                     "league_seed": league_seed,
