@@ -47,7 +47,9 @@ class ScheduleConfig:
     global_repair_iters: int = 3000
     global_repair_max_tries_per_conflict: int = 200
     allow_insert_empty_slot: bool = True
-
+    initial_shuffle: bool = True     
+    initial_shuffle_within_phase: bool = True  
+    global_repair_restarts: int = 10
 
 # ============================================================
 # Time Management（時刻管理）
@@ -676,9 +678,6 @@ class ScheduleBuilder:
             return self._build_global_then_repair()
         return self._build_slot_by_slot()
 
-    # -----------------------------
-    # 旧方式：slot-by-slot
-    # -----------------------------
     def _build_slot_by_slot(self) -> List[List[dict]]:
         slot_no = 0
         self.result = []
@@ -689,16 +688,30 @@ class ScheduleBuilder:
             self._update_cooldown(slot)
         return self.result
 
-    # -----------------------------
-    # 新方式：global placement → repair
-    # -----------------------------
+
     def _build_global_then_repair(self) -> List[List[dict]]:
-        initial = self._build_initial_timetable_ignore_conflicts()
-        repaired = GlobalTimetableRepairer(
-            rng=self.rng,
-            config=self.config,
-        ).repair(initial)
-        return repaired
+        best = None
+        best_conflicts = 10**9
+    
+        for _ in range(self.config.global_repair_restarts):
+            initial = self._build_initial_timetable_ignore_conflicts()
+    
+            repairer = GlobalTimetableRepairer(rng=self.rng, config=self.config)
+            repaired = repairer.repair(initial)
+    
+            # まだ衝突が残るかチェック
+            remaining = len(repairer._find_conflicts(repaired))
+            if remaining == 0:
+                return repaired
+    
+            # ベスト努力：一番マシなものを保持
+            if remaining < best_conflicts:
+                best_conflicts = remaining
+                best = copy.deepcopy(repaired)
+    
+        # 全部ダメでも「一番マシ」な案を返す（or 例外にしてもOK）
+        return best if best is not None else []
+
 
     def _has_remaining_games(self) -> bool:
         return any(len(self.league_q[e]) > 0 for e in self.league_q.keys())
@@ -716,6 +729,16 @@ class ScheduleBuilder:
         for ev, q in self.league_q.items():
             slots: List[List[dict]] = []
 
+            if self.config.initial_shuffle and self.config.initial_shuffle_within_phase:
+                prelim = [g for g in qq if g.get("phase") == "prelim"]
+                cons   = [g for g in qq if g.get("phase") == "consolation"]
+                self.rng.shuffle(prelim)
+                self.rng.shuffle(cons)
+                qq = prelim + cons
+            elif self.config.initial_shuffle:
+                self.rng.shuffle(qq)
+    
+            slots: List[List[dict]] = []
             i = 0
             while i < len(q):
                 phase = q[i].get("phase")
@@ -730,7 +753,16 @@ class ScheduleBuilder:
                     slots.append(chunk)
 
             per_event_slots[ev] = slots
-
+        timetable: List[List[dict]] = []
+        t = 0
+        events = list(per_event_slots.keys())
+        self.rng.shuffle(events)
+    
+        while any(t < len(per_event_slots[ev]) for ev in events):
+            slot: List[dict] = []
+            for ev in events:
+                if t < len(per_event_slots[ev]):
+                    slot.extend(per_event_slots[ev][t])
         # 時程番号で合体（event間を横に合体）
         timetable: List[List[dict]] = []
         t = 0
