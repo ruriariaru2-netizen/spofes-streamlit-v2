@@ -619,7 +619,9 @@ def build_event_queues(all_event_results, seed=0):
         rng.shuffle(L)
 
         # 予選が終わった「次の時程」から、この種目だけ敗者戦を開始できるように
-        # 予選キューの末尾に敗者戦を連結する（敗者戦はphase="consolation"でresource判定無し）
+        # 予選キューの末尾に敗者戦を連結する
+        # ※敗者戦は「同時進行はOK」だが、同一event内で同一順位ラベルが同時に2試合出ないよう
+        #   game_resources_only() 側で ev|label|CONSOL のリソースを付与している
         C = []
         for g in ev.get("consolation_games", []):
             gg = dict(g)
@@ -777,30 +779,6 @@ def schedule_leagues_parallel_flexible_backtracking(
 
     cooldown_forbidden = set()
 
-    def game_player_resources_for_cooldown(g):
-        if g.get("phase") == "consolation":
-            return set()
-        gender = g.get("gender", "X")
-        used = set()
-        for t in g.get("teams", (None, None)):
-            if t is None:
-                continue
-            used |= resources_of_team(t, gender)
-        return used
-
-    def pick_one_random_from_candidates(q, forbidden, lookahead_local):
-        """lookahead内から forbidden と被らない試合を1つランダムに返す (idx, game, used) or None"""
-        limit = min(lookahead_local, len(q))
-        idxs = list(range(limit))
-        rng.shuffle(idxs)
-        for i in idxs:
-            g = q[i]
-            used = game_resources_only(g)
-            if used & forbidden:
-                continue
-            return i, g, set(used)
-        return None
-
     def pick_k_random(q, k, forbidden, lookahead_local):
         """同一種目内で、k個をランダムに（互いに衝突しないように）選ぶ"""
         if k <= 0:
@@ -832,9 +810,9 @@ def schedule_leagues_parallel_flexible_backtracking(
 
     def compute_conflicts(chosen_map):
         """
-        chosen_map: ev -> (idxs, games, used_set)
         return: (has_conflict, conflict_events_set)
-          conflictは「種目間」で used がぶつかることを指す（敗者戦は used が空なら自然に無視される）
+          conflictは「種目間」で used がぶつかることを指す。
+          ※敗者戦は ev|label|CONSOL を使っているため、他eventとは衝突しない（名前空間が分かれている）。
         """
         used_owner = {}  # res -> ev
         conflict_events = set()
