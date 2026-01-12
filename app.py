@@ -37,26 +37,41 @@ def fetch_payload(gas_url: str, year: str) -> dict:
 # =========================
 # payload → scheduler入力に整形
 # =========================
-def _normalize_classes(classes_raw):
+def _normalize_classes(classes_raw, events_raw):
     """
-    classes は [(code, name), ...] 想定。
-    payload が [{"code":..,"name":..}] / [["1A","1年A"],...] などでも吸収する。
+    classes が空でも動くようにする。
+    - classes があればそれを使う
+    - 空なら events の participants から code を集めて (code, code) を作る
     """
-    if not classes_raw:
-        return []
+    # 1) classes が入っている場合：従来通り
+    if classes_raw:
+        out = []
+        for c in classes_raw:
+            if isinstance(c, (list, tuple)) and len(c) >= 2:
+                out.append((str(c[0]), str(c[1])))
+            elif isinstance(c, dict):
+                code = c.get("code") or c.get("class") or c.get("id") or c.get("name")
+                name = c.get("name") or c.get("label") or str(code)
+                out.append((str(code), str(name)))
+            else:
+                out.append((str(c), str(c)))
+        return out
 
-    out = []
-    for c in classes_raw:
-        if isinstance(c, (list, tuple)) and len(c) >= 2:
-            out.append((str(c[0]), str(c[1])))
-        elif isinstance(c, dict):
-            code = c.get("code") or c.get("class") or c.get("id") or c.get("name")
-            name = c.get("name") or c.get("label") or str(code)
-            out.append((str(code), str(name)))
-        else:
-            # 最低限 code だけでも持つ
-            out.append((str(c), str(c)))
-    return out
+    # 2) classes が空：events から自動生成
+    events = _normalize_events(events_raw)
+    codes = set()
+    for ev in events.values():
+        for p in ev.get("participants", []) or []:
+            if p is not None and str(p).strip():
+                codes.add(str(p).strip())
+
+    # ソート（"1A","1B"...っぽい並びを壊しにくい）
+    def _key(x: str):
+        m = re.match(r"^(\d+)([A-Za-z]+)$", x)
+        return (int(m.group(1)), m.group(2)) if m else (10**9, x)
+
+    return [(c, c) for c in sorted(codes, key=_key)]
+
 
 
 def _normalize_events(events_raw):
@@ -128,7 +143,7 @@ def _build_configs_from_params(params: dict) -> tuple[TimeConfig, ScheduleConfig
 
 def build_schedule_locally(payload: dict):
     events = _normalize_events(payload.get("events", {}))
-    classes = _normalize_classes(payload.get("classes", []))
+    classes = _normalize_classes(payload.get("classes", []), payload.get("events", {}))
     params = payload.get("params", {})
 
     time_config, schedule_config, seed = _build_configs_from_params(params)
