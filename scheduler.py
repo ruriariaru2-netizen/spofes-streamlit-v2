@@ -473,7 +473,6 @@ def count_games_per_team(all_event_results):
 
     return game_count_by_event
 
-from collections import defaultdict
 
 def verify_min_games_v2(all_event_results, min_games=3, verbose=True):
     """
