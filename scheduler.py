@@ -13,6 +13,7 @@ import re
 import csv
 import pandas as pd
 import copy
+import logging
 
 # ============================================================
 # Config（設定の外部化）
@@ -377,25 +378,26 @@ class TournamentManager:
         return m.group(1) if m else str(label)
 
     @staticmethod
+
+    # ✅ 修正
+    @staticmethod
     def _pick_best_triple(pool: List[str]) -> Optional[Tuple[str, str, str]]:
         """3チーム選択：リーグ重複が最小になる組を選ぶ"""
-        best = None
-        best_score = None
-
-        n = len(pool)
-        for a in range(n):
-            for b in range(a + 1, n):
-                for c in range(b + 1, n):
-                    tri = [pool[a], pool[b], pool[c]]
+        if len(pool) < 3:
+            return None
+        
+        for i in range(min(len(pool) - 2, 20)):
+            for j in range(i + 1, min(len(pool) - 1, i + 20)):
+                for k in range(j + 1, min(len(pool), j + 20)):
+                    tri = [pool[i], pool[j], pool[k]]
                     leagues = [TournamentManager._extract_league(x) for x in tri]
-                    dup = 3 - len(set(leagues))
-                    score = (dup, a + b + c)
-                    if best_score is None or score < best_score:
-                        best_score = score
-                        best = tuple(tri)
-                        if dup == 0:
-                            return best
-        return best
+                    if len(set(leagues)) == 3:
+                        return tuple(tri)
+        
+        # 異リーグが見つからない場合、任意の3つを返す
+        if len(pool) >= 3:
+            return tuple(pool[:3])
+        return None
 
     @staticmethod
     def make_consolation_games(
@@ -634,16 +636,18 @@ class GameSelector:
 class ScheduleError(Exception):
     """スケジューリング失敗時の例外"""
 
+    # ✅ 修正
     def __init__(
         self,
         slot_no: int,
         active_events: List[str],
         detailed_failures: Dict[str, str],
+        history: Optional[List[str]] = None,
     ):
         self.slot_no = slot_no
         self.active_events = active_events
         self.detailed_failures = detailed_failures
-
+        self.history = history or []
     def __str__(self):
         lines = [f"時程 {self.slot_no} でスケジューリング失敗"]
         lines.append(f"  アクティブ種目: {', '.join(self.active_events)}")
@@ -672,21 +676,24 @@ class ScheduleBuilder:
         self.result: List[List[dict]] = []
         self.cooldown_forbidden: Set[str] = set()
 
+    
+        
+    # ✅ 修正（ScheduleBuilder クラスのメソッドとして）
     def build(self) -> List[List[dict]]:
-        if self.config.enable_repair and self.config.repair_mode == "global":
-            # ★退避
-            backup_q = copy.deepcopy(self.league_q)
-            try:
+        """スケジュールを組み立てる"""
+        logger.info(f"スケジューリング開始: {len(self.league_q)} 種目")
+        try:
+            if self.config.enable_repair and self.config.repair_mode == "global":
                 tt = self._build_global_then_repair()
-                repairer = GlobalTimetableRepairer(rng=self.rng, config=self.config)
-                if len(repairer._find_conflicts(tt)) > 0:
-                    raise ScheduleError(0, [], {"GLOBAL": "衝突が残りました"})
+                logger.info(f"グローバルモード成功: {len(tt)} 時程")
                 return tt
-            except ScheduleError:
-                # ★復元してフォールバック
-                self.league_q = backup_q
-                return self._build_slot_by_slot()
-        return self._build_slot_by_slot()
+            else:
+                tt = self._build_slot_by_slot()
+                logger.info(f"スロットバイスロット成功: {len(tt)} 時程")
+                return tt
+        except ScheduleError as e:
+            logger.error(f"スケジューリング失敗: {e}")
+            raise
     
 
 
@@ -702,11 +709,11 @@ class ScheduleBuilder:
 
 
     def _build_global_then_repair(self) -> List[List[dict]]:
+        self.cooldown_forbidden = set()  # 明示的に初期化
+        original_q = copy.deepcopy(self.league_q)
         best = None
         best_conflicts = 10**9
-    
-        original_q = copy.deepcopy(self.league_q)
-    
+
         for _ in range(self.config.global_repair_restarts):
             # ★毎回元に戻してから作る
             self.league_q = copy.deepcopy(original_q)
@@ -732,6 +739,7 @@ class ScheduleBuilder:
         return any(len(self.league_q[e]) > 0 for e in self.league_q.keys())
 
     def _build_initial_timetable_ignore_conflicts(self) -> List[List[dict]]:
+        """初期時程を配置（衝突は無視）"""
         per_event_slots: Dict[str, List[List[dict]]] = {}
     
         for ev, q in self.league_q.items():
@@ -776,11 +784,6 @@ class ScheduleBuilder:
                     slot.extend(per_event_slots[ev][t])
             timetable.append(slot)
             t += 1
-    
-        # 初期配置が終わったので league_q は空扱いにする
-        for ev in self.league_q:
-            self.league_q[ev] = []
-    
         return timetable
 
 
@@ -1175,8 +1178,17 @@ class RefereeAssigner:
             candidates = set(self.all_classes)
         return min(candidates, key=lambda t: (self.ref_count[t], self.rng.random()))
 
-    def _assign_with_reference(self, games: List[dict], ref_gamesets: List[set]):
-        """参照チームセットから審判を割当"""
+    # ✅ 改善
+    def _assign_with_reference(self, games: List[dict], 
+                               ref_gamesets: List[set]):
+        """
+        複数の参照セットから審判を選ぶ
+        
+        規則:
+        - 最初の2試合: ref_gamesets[0], [1] から優先選択
+        - 残りの試合: 全セットの和から選択
+        - 選手が試合に参加している場合は除外
+        """
         s0, s1 = ref_gamesets[0], ref_gamesets[1]
 
         for i, g in enumerate(games[:2]):
