@@ -708,27 +708,20 @@ class ScheduleBuilder:
             if remaining < best_conflicts:
                 best_conflicts = remaining
                 best = copy.deepcopy(repaired)
-    
-        # 全部ダメでも「一番マシ」な案を返す（or 例外にしてもOK）
-        return best if best is not None else []
-
+        if best is None:
+            raise ScheduleError(0, [], {"GLOBAL": "初期配置/修理に失敗"})
+        return best
 
     def _has_remaining_games(self) -> bool:
         return any(len(self.league_q[e]) > 0 for e in self.league_q.keys())
 
     def _build_initial_timetable_ignore_conflicts(self) -> List[List[dict]]:
-        """
-        ★新方式の初期配置：
-        - eventごとに parallel 単位で機械的に切り出して slot列を作る
-        - その後、時程番号でzipして全体timetableを作る
-        - phaseは混ぜない（queue順：prelimの後にconsolation）
-        - 衝突やcooldownは無視（後でrepair）
-        """
         per_event_slots: Dict[str, List[List[dict]]] = {}
-
+    
         for ev, q in self.league_q.items():
-            slots: List[List[dict]] = []
-
+            qq = list(q)
+    
+            # ★初期シャッフル（phaseを混ぜない）
             if self.config.initial_shuffle and self.config.initial_shuffle_within_phase:
                 prelim = [g for g in qq if g.get("phase") == "prelim"]
                 cons   = [g for g in qq if g.get("phase") == "consolation"]
@@ -740,19 +733,21 @@ class ScheduleBuilder:
     
             slots: List[List[dict]] = []
             i = 0
-            while i < len(q):
-                phase = q[i].get("phase")
+            while i < len(qq):
+                phase = qq[i].get("phase")
                 k = self._get_parallel(ev, phase == "consolation")
-
+    
                 chunk: List[dict] = []
-                while i < len(q) and len(chunk) < k and q[i].get("phase") == phase:
-                    chunk.append(q[i])
+                while i < len(qq) and len(chunk) < k and qq[i].get("phase") == phase:
+                    chunk.append(qq[i])
                     i += 1
-
+    
                 if chunk:
                     slots.append(chunk)
-
+    
             per_event_slots[ev] = slots
+    
+        # 時程番号で合体（event順もランダム化すると成功率↑）
         timetable: List[List[dict]] = []
         t = 0
         events = list(per_event_slots.keys())
@@ -763,23 +758,15 @@ class ScheduleBuilder:
             for ev in events:
                 if t < len(per_event_slots[ev]):
                     slot.extend(per_event_slots[ev][t])
-        # 時程番号で合体（event間を横に合体）
-        timetable: List[List[dict]] = []
-        t = 0
-        events = list(per_event_slots.keys())
-        while any(t < len(per_event_slots[ev]) for ev in events):
-            slot: List[dict] = []
-            for ev in events:
-                if t < len(per_event_slots[ev]):
-                    slot.extend(per_event_slots[ev][t])
             timetable.append(slot)
             t += 1
-
+    
         # 初期配置が終わったので league_q は空扱いにする
         for ev in self.league_q:
             self.league_q[ev] = []
-
+    
         return timetable
+
 
     def _build_slot(self, slot_no: int) -> List[dict]:
         """1時程を組み立てる"""
