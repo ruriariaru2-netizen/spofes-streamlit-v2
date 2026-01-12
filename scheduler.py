@@ -674,17 +674,20 @@ class ScheduleBuilder:
 
     def build(self) -> List[List[dict]]:
         if self.config.enable_repair and self.config.repair_mode == "global":
+            # ★退避
+            backup_q = copy.deepcopy(self.league_q)
             try:
                 tt = self._build_global_then_repair()
-                # ここで最終チェック（0じゃなければ例外）
                 repairer = GlobalTimetableRepairer(rng=self.rng, config=self.config)
                 if len(repairer._find_conflicts(tt)) > 0:
                     raise ScheduleError(0, [], {"GLOBAL": "衝突が残りました"})
                 return tt
             except ScheduleError:
-                # フォールバック
+                # ★復元してフォールバック
+                self.league_q = backup_q
                 return self._build_slot_by_slot()
         return self._build_slot_by_slot()
+    
 
 
     def _build_slot_by_slot(self) -> List[List[dict]]:
@@ -1368,13 +1371,13 @@ class TimetableBuilder:
         )
 
         if self.time_config.enforce_tournament_start:
-            late = TimeManager.minutes_between(
+            over = TimeManager.minutes_between(
                 self.time_config.tournament_start_time, after_prelim
             )
-            if late > 0:
+            if over > 0:
                 raise RuntimeError(
                     f"本選を {self.time_config.tournament_start_time} に開始予定が、"
-                    f"予選が {after_prelim} までかかり {late} 分オーバー"
+                    f"予選が {after_prelim} までかかり {over} 分オーバー"
                 )
             empty = TimeManager.num_empty_slots_to_reach(
                 after_prelim,
