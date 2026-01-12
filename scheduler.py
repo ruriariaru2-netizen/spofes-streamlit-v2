@@ -71,10 +71,37 @@ def resources_of_team(team, gender):
     return {f"{team}_M", f"{team}_F"}
 
 def game_resources_only(game):
-    """その試合が同時刻に占有するリソース集合"""
-    # 敗者戦（順位ラベル）は別種目と衝突判定したくないのでリソース無し扱い
+    """
+    同時刻に占有するリソース集合
+    - 予選/本選: クラス×性別の衝突を防ぐ
+    - 敗者戦: 同じevent内で、同じ順位ラベルが同時に2試合出ないようにする
+    """
+    ev = game.get("event", "")
+    phase = game.get("phase", "")
+    gender = game.get("gender", "X")
+
+    used = set()
+    a, b = game.get("teams", (None, None))
+
+    if phase == "consolation":
+        # ★敗者戦は“同一種目内だけ”で重複禁止（他種目とは衝突させない）
+        for t in (a, b):
+            if t is not None:
+                used.add(f"{ev}|{t}|CONSOL")
+        return used
+
+    # 予選・本選は従来通り（男女/混合の衝突）
+    for t in (a, b):
+        if t is None:
+            continue
+        used |= resources_of_team(t, gender)
+
+    return used
+
+def game_player_resources(game):
+    """連続禁止に使う“プレイヤー（クラス×性別）”のリソース"""
     if game.get("phase") == "consolation":
-        return set()
+        return set()  # 敗者戦は対象外
     gender = game.get("gender", "X")
     used = set()
     for t in game.get("teams", (None, None)):
