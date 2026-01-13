@@ -377,9 +377,8 @@ class TournamentManager:
         m = re.match(r"^([A-Z]+)", str(label))
         return m.group(1) if m else str(label)
 
-    @staticmethod
 
-    # ✅ 修正
+
     @staticmethod
     def _pick_best_triple(pool: List[str]) -> Optional[Tuple[str, str, str]]:
         """3チーム選択：リーグ重複が最小になる組を選ぶ"""
@@ -422,10 +421,12 @@ class TournamentManager:
 
             # 奇数の場合、3チーム総当たり用を確保
             triple = None
+    
             if len(pool) % 2 == 1 and len(pool) >= 3:
                 triple = TournamentManager._pick_best_triple(pool)
-                triple_set = set(triple)
-                pool = [x for x in pool if x not in triple_set]
+                if triple:  # ← None チェック追加
+                    triple_set = set(triple)
+                    pool = [x for x in pool if x not in triple_set]
 
             # 残り（偶数）をペアリング
             while len(pool) >= 2:
@@ -648,6 +649,7 @@ class ScheduleError(Exception):
         self.active_events = active_events
         self.detailed_failures = detailed_failures
         self.history = history or []
+
     def __str__(self):
         lines = [f"時程 {self.slot_no} でスケジューリング失敗"]
         lines.append(f"  アクティブ種目: {', '.join(self.active_events)}")
@@ -676,9 +678,6 @@ class ScheduleBuilder:
         self.result: List[List[dict]] = []
         self.cooldown_forbidden: Set[str] = set()
 
-    
-        
-    # ✅ 修正（ScheduleBuilder クラスのメソッドとして）
     def build(self) -> List[List[dict]]:
         """スケジュールを組み立てる"""
         logger.info(f"スケジューリング開始: {len(self.league_q)} 種目")
@@ -695,8 +694,6 @@ class ScheduleBuilder:
             logger.error(f"スケジューリング失敗: {e}")
             raise
     
-
-
     def _build_slot_by_slot(self) -> List[List[dict]]:
         slot_no = 0
         self.result = []
